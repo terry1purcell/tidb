@@ -2713,6 +2713,15 @@ func tryToGetMppHashJoin(super base.LogicalPlan, prop *property.PhysicalProperty
 func exhaustPhysicalPlans4LogicalJoin(super base.LogicalPlan, prop *property.PhysicalProperty) ([]base.PhysicalPlan, bool, error) {
 	ge, p := base.GetGEAndLogicalOp[*logicalop.LogicalJoin](super)
 
+	// For semi/anti-semi joins, deduplicate the inner child on join key columns.
+	// This reduces the inner side cardinality for HashJoin and MergeJoin, which use
+	// the logical inner child. IndexJoin variants construct their own inner plan from
+	// the DataSource index paths and are unaffected by this aggregation.
+	// The SemiJoinInnerDedup method has guards to avoid duplicate aggregations.
+	if _, err := p.SemiJoinInnerDedup(); err != nil {
+		return nil, false, err
+	}
+
 	if !isJoinHintSupportedInMPPMode(p.PreferJoinType) {
 		if hasMPPJoinHints(p.PreferJoinType) {
 			// If there are MPP hints but has some conflicts join method hints, all the join hints are invalid.

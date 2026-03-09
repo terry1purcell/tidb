@@ -292,7 +292,7 @@ id	task	access object	operator info
 Sort	root		tpch50.orders.o_orderpriority
 └─Projection	root		tpch50.orders.o_orderpriority, Column
   └─HashAgg	root		group by:tpch50.orders.o_orderpriority, funcs:count(1)->Column, funcs:firstrow(tpch50.orders.o_orderpriority)->tpch50.orders.o_orderpriority
-    └─IndexHashJoin	root		semi join, inner:IndexLookUp, left side:TableReader, outer key:tpch50.orders.o_orderkey, inner key:tpch50.lineitem.l_orderkey, equal cond:eq(tpch50.orders.o_orderkey, tpch50.lineitem.l_orderkey)
+    └─IndexJoin	root		semi join, inner:IndexLookUp, left side:TableReader, outer key:tpch50.orders.o_orderkey, inner key:tpch50.lineitem.l_orderkey, equal cond:eq(tpch50.orders.o_orderkey, tpch50.lineitem.l_orderkey)
       ├─TableReader(Build)	root		data:Selection
       │ └─Selection	cop[tikv]		ge(tpch50.orders.o_orderdate, 1995-01-01 00:00:00.000000), lt(tpch50.orders.o_orderdate, 1995-04-01 00:00:00.000000)
       │   └─TableFullScan	cop[tikv]	table:orders	keep order:false
@@ -1221,8 +1221,8 @@ id	task	access object	operator info
 Projection	root		tpch50.supplier.s_name, Column
 └─TopN	root		Column:desc, tpch50.supplier.s_name, offset:0, count:100
   └─HashAgg	root		group by:tpch50.supplier.s_name, funcs:count(1)->Column, funcs:firstrow(tpch50.supplier.s_name)->tpch50.supplier.s_name
-    └─IndexHashJoin	root		anti semi join, inner:IndexLookUp, left side:IndexHashJoin, outer key:tpch50.lineitem.l_orderkey, inner key:tpch50.lineitem.l_orderkey, equal cond:eq(tpch50.lineitem.l_orderkey, tpch50.lineitem.l_orderkey), other cond:ne(tpch50.lineitem.l_suppkey, tpch50.lineitem.l_suppkey)
-      ├─IndexHashJoin(Build)	root		semi join, inner:IndexLookUp, left side:IndexJoin, outer key:tpch50.lineitem.l_orderkey, inner key:tpch50.lineitem.l_orderkey, equal cond:eq(tpch50.lineitem.l_orderkey, tpch50.lineitem.l_orderkey), other cond:ne(tpch50.lineitem.l_suppkey, tpch50.lineitem.l_suppkey)
+    └─IndexJoin	root		anti semi join, inner:IndexLookUp, left side:IndexJoin, outer key:tpch50.lineitem.l_orderkey, inner key:tpch50.lineitem.l_orderkey, equal cond:eq(tpch50.lineitem.l_orderkey, tpch50.lineitem.l_orderkey), other cond:ne(tpch50.lineitem.l_suppkey, tpch50.lineitem.l_suppkey)
+      ├─IndexJoin(Build)	root		semi join, inner:IndexLookUp, left side:IndexJoin, outer key:tpch50.lineitem.l_orderkey, inner key:tpch50.lineitem.l_orderkey, equal cond:eq(tpch50.lineitem.l_orderkey, tpch50.lineitem.l_orderkey), other cond:ne(tpch50.lineitem.l_suppkey, tpch50.lineitem.l_suppkey)
       │ ├─IndexJoin(Build)	root		inner join, inner:TableReader, outer key:tpch50.lineitem.l_orderkey, inner key:tpch50.orders.o_orderkey, equal cond:eq(tpch50.lineitem.l_orderkey, tpch50.orders.o_orderkey)
       │ │ ├─HashJoin(Build)	root		inner join, equal:[eq(tpch50.supplier.s_suppkey, tpch50.lineitem.l_suppkey)]
       │ │ │ ├─HashJoin(Build)	root		inner join, equal:[eq(tpch50.nation.n_nationkey, tpch50.supplier.s_nationkey)]

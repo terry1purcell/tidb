@@ -949,20 +949,9 @@ func (e *exchSenderExec) toTiPBChunk(chk *chunk.Chunk) ([]tipb.Chunk, error) {
 }
 
 func (e *exchSenderExec) next() (*chunk.Chunk, error) {
-	var mppCtx context.Context
-	if e.mppCtx != nil {
-		mppCtx = e.mppCtx.Ctx
-	}
 	defer func() {
 		for _, tunnel := range e.tunnels {
-			if mppCtx == nil {
-				<-tunnel.connectedCh
-			} else {
-				select {
-				case <-tunnel.connectedCh:
-				case <-mppCtx.Done():
-				}
-			}
+			<-tunnel.connectedCh
 			close(tunnel.ErrCh)
 			close(tunnel.DataCh)
 		}

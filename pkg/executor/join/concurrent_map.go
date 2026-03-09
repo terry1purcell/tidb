@@ -16,7 +16,6 @@ package join
 
 import (
 	"github.com/pingcap/tidb/pkg/util/hack"
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/syncutil"
 )
 
@@ -39,9 +38,6 @@ func newConcurrentMap() concurrentMap {
 	for i := range ShardCount {
 		m[i] = &concurrentMapShared{}
 		m[i].items.Init(make(map[uint64]*entry))
-		if intest.InTest {
-			m[i].items.MockSeedForTest()
-		}
 	}
 	return m
 }

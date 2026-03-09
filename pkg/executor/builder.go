@@ -830,7 +830,7 @@ func (b *executorBuilder) buildLimit(v *physicalop.PhysicalLimit) exec.Executor 
 	}
 	// Propagate the limit count to index join children so they can use
 	// smaller outer batches, allowing the Limit to short-circuit sooner.
-	limitCount := v.Offset + v.Count
+	limitCount := min(v.Offset+v.Count, uint64(math.MaxInt))
 	switch child := childExec.(type) {
 	case *join.IndexNestedLoopHashJoin:
 		child.LimitCount = limitCount

@@ -464,7 +464,7 @@ func (ow *outerWorker) buildTask(ctx context.Context) (*lookUpJoinTask, error) {
 		// ow.lookup.requiredRows is set when `Next` is called. Thus we check
 		// whether it's 0 here.
 		if parentRequired := int(atomic.LoadInt64(&ow.lookup.requiredRows)); parentRequired != 0 {
-			requiredRows = parentRequired
+			requiredRows = min(parentRequired, ow.maxBatchSize)
 		}
 	}
 	maxChunkSize := ow.ctx.GetSessionVars().MaxChunkSize
@@ -481,6 +481,7 @@ func (ow *outerWorker) buildTask(ctx context.Context) (*lookUpJoinTask, error) {
 
 		task.outerResult.Add(chk)
 	}
+	failpoint.InjectCall("testIndexJoinOuterRowsFetched", task.outerResult.Len())
 	if task.outerResult.Len() == 0 {
 		return nil, nil
 	}

@@ -20,6 +20,7 @@ import (
 	"math/rand"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/pingcap/failpoint"
@@ -356,6 +357,22 @@ func TestIndexHashJoinLimitBatchSize(t *testing.T) {
 	tk.MustExec("insert into t1 values " + sb.String())
 	tk.MustExec("insert into t2 values " + sb.String())
 
+	// Pin a small batch size so the optimization is clearly observable.
+	tk.MustExec("set @@tidb_index_join_batch_size = 100")
+
+	// Track how many outer rows each batch fetches via failpoint.
+	var maxOuterRows int64
+	require.NoError(t, failpoint.EnableCall("github.com/pingcap/tidb/pkg/executor/join/testIndexJoinOuterRowsFetched",
+		func(outerRows int) {
+			if int64(outerRows) > atomic.LoadInt64(&maxOuterRows) {
+				atomic.StoreInt64(&maxOuterRows, int64(outerRows))
+			}
+		},
+	))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/testIndexJoinOuterRowsFetched"))
+	}()
+
 	// Semi join (EXISTS) with ORDER BY ... LIMIT via IndexHashJoin.
 	// With the optimization, the outer worker reads batches of ~100 rows
 	// instead of all 5000, allowing the Limit to short-circuit.
@@ -368,4 +385,11 @@ func TestIndexHashJoinLimitBatchSize(t *testing.T) {
 	// First row should be a=1 (ordered by PK).
 	require.Equal(t, "1", rows[0][0].(string))
 	require.Equal(t, "100", rows[99][0].(string))
+
+	// Each batch should fetch close to the pinned batch size (100 rows).
+	// Allow some slack for chunk-size alignment, but it must be well under
+	// the default batch size of 25000 that would be used without the
+	// Limit-aware optimization.
+	require.LessOrEqual(t, atomic.LoadInt64(&maxOuterRows), int64(200),
+		"outer worker fetched far more rows than the capped batch size")
 }

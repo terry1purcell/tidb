@@ -42,7 +42,7 @@ type result struct {
 }
 
 type outerRow struct {
-	row      *chunk.Row
+	row      chunk.Row
 	selected bool // if this row is selected by the outer side
 	seq      uint64
 }
@@ -303,7 +303,7 @@ func (e *ParallelNestedLoopApplyExec) outerWorker(ctx context.Context) {
 				}
 			}
 			row := chk.GetRow(i)
-			or := outerRow{row: &row, selected: selected[i], seq: seq}
+			or := outerRow{row: row, selected: selected[i], seq: seq}
 			seq++
 			select {
 			case e.outerRowCh <- or:
@@ -390,7 +390,7 @@ func (e *ParallelNestedLoopApplyExec) processOneOuterRow(ctx context.Context, id
 			// OnMissMatch appends at most one row; use capacity 1
 			// instead of the full chunk size to reduce allocation.
 			chk := chunk.New(exec.RetTypes(e), 1, 1)
-			e.joiners[id].OnMissMatch(false, *or.row, chk)
+			e.joiners[id].OnMissMatch(false, or.row, chk)
 			return []*chunk.Chunk{chk}, nil
 		}
 		return nil, nil // no allocation needed for filtered-out rows
@@ -398,7 +398,7 @@ func (e *ParallelNestedLoopApplyExec) processOneOuterRow(ctx context.Context, id
 
 	chk := exec.NewFirstChunk(e)
 
-	e.outerRow[id] = or.row
+	e.outerRow[id] = &or.row
 	e.hasMatch[id] = false
 	e.hasNull[id] = false
 
@@ -424,7 +424,7 @@ func (e *ParallelNestedLoopApplyExec) processOneOuterRow(ctx context.Context, id
 	}
 
 	if !e.hasMatch[id] {
-		e.joiners[id].OnMissMatch(e.hasNull[id], *or.row, chk)
+		e.joiners[id].OnMissMatch(e.hasNull[id], or.row, chk)
 	}
 	if chk.NumRows() > 0 {
 		chks = append(chks, chk)
@@ -661,14 +661,14 @@ func (e *ParallelNestedLoopApplyExec) fetchNextOuterRow(id int, req *chunk.Chunk
 			}
 			if !outerRow.selected {
 				if e.outer {
-					e.joiners[id].OnMissMatch(false, *outerRow.row, req)
+					e.joiners[id].OnMissMatch(false, outerRow.row, req)
 					if req.IsFull() {
 						return nil, false
 					}
 				}
 				continue // try the next outer row
 			}
-			return outerRow.row, false
+			return &outerRow.row, false
 		case <-e.exit:
 			return nil, true
 		}

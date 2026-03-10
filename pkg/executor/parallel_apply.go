@@ -55,6 +55,12 @@ type orderedResult struct {
 	err  error
 }
 
+// ParallelApplyCancelledCount is incremented each time the
+// parallelApplySlowInner failpoint is cancelled via context rather than
+// completing its sleep naturally. Used by tests to verify that
+// cancel-in-flight propagation works without relying on wall-clock timing.
+var ParallelApplyCancelledCount atomic.Int64
+
 // ParallelNestedLoopApplyExec is the executor for apply.
 type ParallelNestedLoopApplyExec struct {
 	exec.BaseExecutor
@@ -673,6 +679,7 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 			select {
 			case <-time.After(time.Duration(ms) * time.Millisecond):
 			case <-ctx.Done():
+				ParallelApplyCancelledCount.Add(1)
 				failpoint.Return(ctx.Err())
 			}
 		}

@@ -55,6 +55,13 @@ type orderedResult struct {
 	err  error
 }
 
+// Lifecycle states for ParallelNestedLoopApplyExec.started.
+const (
+	applyNotStarted uint32 = 0 // workers not yet launched
+	applyStarted    uint32 = 1 // all workers launched and WaitGroups registered
+	applyClosed     uint32 = 2 // Close() has been called; no new workers may start
+)
+
 // ParallelApplyInnerGate is a test-only gate for the parallelApplySlowInner
 // failpoint. When non-nil, workers block on receiving from this channel (or
 // ctx.Done()) instead of using time.After. This allows tests to control
@@ -89,7 +96,7 @@ type ParallelNestedLoopApplyExec struct {
 	concurrency int
 	keepOrder   bool // when true, use reorder buffer to preserve outer-side ordering
 	startMu     sync.Mutex
-	started     uint32 // 0 = not started, 1 = started; accessed atomically for fast-path
+	started     uint32 // applyNotStarted/applyStarted/applyClosed; atomic for fast-path
 	drained     uint32 // drained == true indicates there is no more data
 	freeChkCh   chan *chunk.Chunk
 	resultChkCh chan result
@@ -199,9 +206,14 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 		return nil
 	}
 
-	if atomic.LoadUint32(&e.started) == 0 {
+	if atomic.LoadUint32(&e.started) != applyStarted {
 		e.startMu.Lock()
-		if atomic.LoadUint32(&e.started) == 0 {
+		switch atomic.LoadUint32(&e.started) {
+		case applyClosed:
+			e.startMu.Unlock()
+			req.Reset()
+			return nil
+		case applyNotStarted:
 			// workerCtx is a cancellable child of ctx. Close() calls
 			// cancelWorkers() to abort in-flight inner/outer workers
 			// (e.g. for LIMIT queries). Coordination goroutines
@@ -239,8 +251,8 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 			}
 			// Publish started only after all WaitGroup registrations and
 			// goroutine launches are complete, so Close() cannot observe
-			// started==1 before notifyWg.Add() calls finish.
-			atomic.StoreUint32(&e.started, 1)
+			// applyStarted before notifyWg.Add() calls finish.
+			atomic.StoreUint32(&e.started, applyStarted)
 		}
 		e.startMu.Unlock()
 	}
@@ -262,7 +274,11 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 func (e *ParallelNestedLoopApplyExec) Close() error {
 	e.memTracker = nil
 	e.startMu.Lock()
-	if atomic.LoadUint32(&e.started) == 1 {
+	wasStarted := atomic.LoadUint32(&e.started) == applyStarted
+	// Transition to applyClosed so any concurrent/subsequent Next() bails
+	// out without launching workers.
+	atomic.StoreUint32(&e.started, applyClosed)
+	if wasStarted {
 		close(e.exit)
 		// Cancel the worker context to abort in-flight cop requests
 		// (e.g. inner-side scans) immediately rather than waiting for
@@ -273,11 +289,10 @@ func (e *ParallelNestedLoopApplyExec) Close() error {
 			e.cancelWorkers()
 			e.cancelWorkers = nil
 		}
-		atomic.StoreUint32(&e.started, 0)
-		e.startMu.Unlock()
+	}
+	e.startMu.Unlock()
+	if wasStarted {
 		e.notifyWg.Wait()
-	} else {
-		e.startMu.Unlock()
 	}
 	// Wait all workers to finish before Close() is called.
 	// Otherwise we may got data race.

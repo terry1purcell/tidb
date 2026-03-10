@@ -82,7 +82,8 @@ type ParallelNestedLoopApplyExec struct {
 	// fields about concurrency control
 	concurrency int
 	keepOrder   bool // when true, use reorder buffer to preserve outer-side ordering
-	started     uint32
+	startMu sync.Mutex
+	started uint32 // 0 = not started, 1 = started; accessed atomically for fast-path
 	drained     uint32 // drained == true indicates there is no more data
 	freeChkCh   chan *chunk.Chunk
 	resultChkCh chan result
@@ -192,42 +193,50 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 		return nil
 	}
 
-	if atomic.CompareAndSwapUint32(&e.started, 0, 1) {
-		// workerCtx is a cancellable child of ctx. Close() calls
-		// cancelWorkers() to abort in-flight inner/outer workers
-		// (e.g. for LIMIT queries). Coordination goroutines
-		// (notifyWorker, bridge) use the parent ctx instead, since
-		// they must outlive the workers to perform cleanup.
-		workerCtx, cancelWorkers := context.WithCancel(ctx)
-		e.cancelWorkers = cancelWorkers
-		e.workerWg.Add(1)
-		go e.outerWorker(workerCtx)
-		if e.keepOrder {
-			for i := range e.concurrency {
-				e.workerWg.Add(1)
-				go e.innerWorkerOrdered(workerCtx, i)
+	if atomic.LoadUint32(&e.started) == 0 {
+		e.startMu.Lock()
+		if atomic.LoadUint32(&e.started) == 0 {
+			// workerCtx is a cancellable child of ctx. Close() calls
+			// cancelWorkers() to abort in-flight inner/outer workers
+			// (e.g. for LIMIT queries). Coordination goroutines
+			// (notifyWorker, bridge) use the parent ctx instead, since
+			// they must outlive the workers to perform cleanup.
+			workerCtx, cancelWorkers := context.WithCancel(ctx)
+			e.cancelWorkers = cancelWorkers
+			e.workerWg.Add(1)
+			go e.outerWorker(workerCtx)
+			if e.keepOrder {
+				for i := range e.concurrency {
+					e.workerWg.Add(1)
+					go e.innerWorkerOrdered(workerCtx, i)
+				}
+				// Bridge goroutine: when all outer+inner workers finish,
+				// close orderedResultCh so the reorder worker can drain and exit.
+				e.notifyWg.Add(1)
+				go func() {
+					defer e.handleWorkerPanic(workerCtx, &e.notifyWg)
+					e.workerWg.Wait()
+					close(e.orderedResultCh)
+				}()
+				// The reorder worker is tracked by notifyWg so that
+				// Close() waits for it to fully exit before returning.
+				e.notifyWg.Add(1)
+				go e.reorderWorker(workerCtx)
+			} else {
+				for i := range e.concurrency {
+					e.workerWg.Add(1)
+					workID := i
+					go e.innerWorker(workerCtx, workID)
+				}
+				e.notifyWg.Add(1)
+				go e.notifyWorker(ctx) // deliberately uses ctx, not workerCtx (see above)
 			}
-			// Bridge goroutine: when all outer+inner workers finish,
-			// close orderedResultCh so the reorder worker can drain and exit.
-			e.notifyWg.Add(1)
-			go func() {
-				defer e.handleWorkerPanic(workerCtx, &e.notifyWg)
-				e.workerWg.Wait()
-				close(e.orderedResultCh)
-			}()
-			// The reorder worker is tracked by notifyWg so that
-			// Close() waits for it to fully exit before returning.
-			e.notifyWg.Add(1)
-			go e.reorderWorker(workerCtx)
-		} else {
-			for i := range e.concurrency {
-				e.workerWg.Add(1)
-				workID := i
-				go e.innerWorker(workerCtx, workID)
-			}
-			e.notifyWg.Add(1)
-			go e.notifyWorker(ctx) // deliberately uses ctx, not workerCtx (see above)
+			// Publish started only after all WaitGroup registrations and
+			// goroutine launches are complete, so Close() cannot observe
+			// started==1 before notifyWg.Add() calls finish.
+			atomic.StoreUint32(&e.started, 1)
 		}
+		e.startMu.Unlock()
 	}
 	result := <-e.resultChkCh
 	if result.err != nil {
@@ -246,6 +255,7 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 // Close implements the Executor interface.
 func (e *ParallelNestedLoopApplyExec) Close() error {
 	e.memTracker = nil
+	e.startMu.Lock()
 	if atomic.LoadUint32(&e.started) == 1 {
 		close(e.exit)
 		// Cancel the worker context to abort in-flight cop requests
@@ -257,8 +267,11 @@ func (e *ParallelNestedLoopApplyExec) Close() error {
 			e.cancelWorkers()
 			e.cancelWorkers = nil
 		}
-		e.notifyWg.Wait()
 		atomic.StoreUint32(&e.started, 0)
+		e.startMu.Unlock()
+		e.notifyWg.Wait()
+	} else {
+		e.startMu.Unlock()
 	}
 	// Wait all workers to finish before Close() is called.
 	// Otherwise we may got data race.

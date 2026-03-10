@@ -1914,7 +1914,7 @@ func TestOrderingIdxSelectivityRatioForApply(t *testing.T) {
 	query := "select * from t1 where exists (select /*+ no_decorrelate() */ 1 from t2 where t2.b = t1.b and t2.c > 1) order by t1.b limit 2"
 
 	// hasApply checks that at least one operator in the plan is an Apply.
-	hasApply := func(rows [][]interface{}) bool {
+	hasApply := func(rows [][]any) bool {
 		for _, row := range rows {
 			if strings.Contains(row[0].(string), "Apply") {
 				return true

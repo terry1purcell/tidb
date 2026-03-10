@@ -2880,25 +2880,13 @@ func exhaustPhysicalPlans4LogicalApply(super base.LogicalPlan, prop *property.Ph
 		canUseCache = false
 	}
 
-	// Compute the expected row count for the outer child.  For a semi/anti-semi
-	// join, each outer row produces at most one output row, so if the parent
-	// expects N rows we need N / selectivity outer rows.  For other join types
-	// the ratio may differ, but using the Apply's own selectivity is still a
-	// reasonable approximation.
+	// When the parent requires ordering, compute the expected outer row count
+	// accounting for the ordering index selectivity ratio, so that ordered
+	// scans model the extra outer rows that may need to be read before the
+	// inner side produces enough matching rows (same logic used by IndexJoin).
 	outerExpectedCnt := math.MaxFloat64
-	if prop.ExpectedCnt < math.MaxFloat64 {
-		outerRowCount := stats0.RowCount
-		applyRowCount := la.StatsInfo().RowCount
-		if applyRowCount > 0 && outerRowCount > 0 {
-			selectivity := applyRowCount / outerRowCount
-			if selectivity > 0 {
-				outerExpectedCnt = prop.ExpectedCnt / selectivity
-			}
-		}
-		// The outer side can never need fewer rows than the parent expects.
-		if outerExpectedCnt < prop.ExpectedCnt {
-			outerExpectedCnt = prop.ExpectedCnt
-		}
+	if !prop.IsSortItemEmpty() {
+		outerExpectedCnt = calcOuterExpectedCnt(la.SCtx(), prop, stats0.RowCount, la.StatsInfo().RowCount)
 	}
 
 	apply := physicalop.PhysicalApply{

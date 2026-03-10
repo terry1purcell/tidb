@@ -55,11 +55,11 @@ type orderedResult struct {
 	err  error
 }
 
-// ParallelApplyCancelledCount is incremented each time the
-// parallelApplySlowInner failpoint is cancelled via context rather than
-// completing its sleep naturally. Used by tests to verify that
-// cancel-in-flight propagation works without relying on wall-clock timing.
-var ParallelApplyCancelledCount atomic.Int64
+// ParallelApplyInnerGate is a test-only gate for the parallelApplySlowInner
+// failpoint. When non-nil, workers block on receiving from this channel (or
+// ctx.Done()) instead of using time.After. This allows tests to control
+// exactly which workers proceed and which block, avoiding timing dependencies.
+var ParallelApplyInnerGate chan struct{}
 
 // ParallelNestedLoopApplyExec is the executor for apply.
 type ParallelNestedLoopApplyExec struct {
@@ -674,12 +674,19 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 	}
 	// Simulate a slow inner execution after the inner executor is opened,
 	// so the delay occurs when a real cop request would be in-flight.
+	// When ParallelApplyInnerGate is non-nil, block on it (or ctx.Done())
+	// instead of sleeping, giving tests deterministic control.
 	failpoint.Inject("parallelApplySlowInner", func(val failpoint.Value) {
-		if ms, ok := val.(int); ok {
+		if ParallelApplyInnerGate != nil {
+			select {
+			case <-ParallelApplyInnerGate:
+			case <-ctx.Done():
+				failpoint.Return(ctx.Err())
+			}
+		} else if ms, ok := val.(int); ok {
 			select {
 			case <-time.After(time.Duration(ms) * time.Millisecond):
 			case <-ctx.Done():
-				ParallelApplyCancelledCount.Add(1)
 				failpoint.Return(ctx.Err())
 			}
 		}

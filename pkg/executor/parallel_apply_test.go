@@ -532,46 +532,49 @@ func TestParallelApplyCancelInflight(t *testing.T) {
 	sql := "select * from (select t1.a from t1 where exists (select /*+ NO_DECORRELATE() */ 1 from t2 where t2.a < t1.a)) sub limit 1"
 	checkApplyPlan(t, tk, sql, 3)
 
-	// The failpoint makes each inner execution sleep 1s but respects
-	// context cancellation, so cancelled workers return immediately.
-	// We set initCap=1 and maxChunkSize=1 via failpoint so that each
-	// result chunk holds only 1 row. This forces workers to produce
-	// results after every matching outer row, so LIMIT 1 can close
-	// after the very first result.
+	// Use a channel-based gate instead of a timed sleep to avoid any
+	// wall-clock dependency. We set initCap=1 and maxChunkSize=1 so
+	// each result chunk holds only 1 row, ensuring LIMIT 1 triggers
+	// Close() after the very first result.
 	//
-	// Execution flow with concurrency=3 and maxChunkSize=1:
-	//   1. 3 workers grab free chunks and outer rows, sleep 1s in parallel.
-	//   2. At ~1s all 3 produce 1-row results into resultChkCh.
-	//   3. Next() consumes 1 result (LIMIT 1), recycling 1 chunk.
-	//   4. 1 worker grabs the recycled chunk, gets the next outer row,
-	//      and starts a second 1s sleep.
-	//   5. Close() fires and cancels workerCtx.
-	//   With cancellation: the sleeping worker's ctx.Done() fires
-	//   immediately, incrementing ParallelApplyCancelledCount.
-	//   Without cancellation: the worker sleeps to completion and
-	//   the counter stays at zero.
+	// The gate has exactly `concurrency` tokens, letting the first
+	// batch of workers through immediately. After LIMIT 1 consumes
+	// one result, Close() fires. Any worker that starts a second
+	// iteration blocks on the now-empty gate:
+	//   With cancellation: workerCtx is cancelled → ctx.Done() fires
+	//   → worker unblocks and exits → query completes.
+	//   Without cancellation: worker blocks on gate forever → query
+	//   hangs → test times out.
+	const concurrency = 3
+	executor.ParallelApplyInnerGate = make(chan struct{}, concurrency)
+	for range concurrency {
+		executor.ParallelApplyInnerGate <- struct{}{}
+	}
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/internal/exec/initCap", `return(1)`))
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/internal/exec/maxChunkSize", `return(1)`))
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/parallelApplySlowInner", `return(1000)`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/parallelApplySlowInner", `return(1)`))
 	defer func() {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/parallelApplySlowInner"))
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/internal/exec/initCap"))
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/internal/exec/maxChunkSize"))
+		executor.ParallelApplyInnerGate = nil
 	}()
 
-	// LIMIT 1: once one row is produced, Close() fires and should cancel
-	// in-flight inner workers via context cancellation.
-	executor.ParallelApplyCancelledCount.Store(0)
-	rows := tk.MustQuery(sql).Rows()
+	// Run the query in a goroutine so we can apply a timeout.
+	type queryResult struct {
+		rows [][]interface{}
+	}
+	done := make(chan queryResult, 1)
+	go func() {
+		done <- queryResult{rows: tk.MustQuery(sql).Rows()}
+	}()
 
-	// We got exactly 1 row.
-	require.Len(t, rows, 1)
-	// At least one worker must have been cancelled via context. If
-	// cancellation does not propagate (workers use parent ctx instead
-	// of workerCtx), the counter stays at zero because all workers
-	// complete their sleep naturally.
-	require.Greater(t, executor.ParallelApplyCancelledCount.Load(), int64(0),
-		"no workers were cancelled; cancel-in-flight is not propagating")
+	select {
+	case r := <-done:
+		require.Len(t, r.rows, 1)
+	case <-time.After(10 * time.Second):
+		t.Fatal("query hung; cancel-in-flight is not propagating to workers")
+	}
 }
 
 func TestOrderedParallelApply(t *testing.T) {

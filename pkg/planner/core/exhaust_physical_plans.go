@@ -255,12 +255,18 @@ func constructIndexHashJoinStatic(
 // an ordered join (IndexJoin or Apply) given the parent's ExpectedCnt. It
 // accounts for the OptOrderingIdxSelRatio to model extra outer rows that may
 // need to be scanned before the inner side produces enough matching rows.
+// The ordering penalty (rowsToMeetFirst) is only applied when the property
+// requires ordered output.
 func calcOuterExpectedCnt(sctx base.PlanContext, prop *property.PhysicalProperty, outerRowCount, estimatedRowCount float64) float64 {
 	orderRatio := sctx.GetSessionVars().OptOrderingIdxSelRatio
 	sctx.GetSessionVars().RecordRelevantOptVar(vardef.TiDBOptOrderingIdxSelRatio)
+	hasOrder := !prop.IsSortItemEmpty()
 	if (prop.ExpectedCnt < estimatedRowCount) ||
-		(orderRatio > 0 && outerRowCount > estimatedRowCount && prop.ExpectedCnt < outerRowCount && estimatedRowCount > 0) {
-		rowsToMeetFirst := max(0.0, (outerRowCount-estimatedRowCount)*orderRatio)
+		(hasOrder && orderRatio > 0 && outerRowCount > estimatedRowCount && prop.ExpectedCnt < outerRowCount && estimatedRowCount > 0) {
+		var rowsToMeetFirst float64
+		if hasOrder {
+			rowsToMeetFirst = max(0.0, (outerRowCount-estimatedRowCount)*orderRatio)
+		}
 		expCntScale := prop.ExpectedCnt / estimatedRowCount
 		return (outerRowCount * expCntScale) + rowsToMeetFirst
 	}

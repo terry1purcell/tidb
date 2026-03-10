@@ -251,6 +251,22 @@ func constructIndexHashJoinStatic(
 // The indexJoinProp is passed down to the inner side, which contains the runtime constant inner key, which is used to build the
 // underlying index/pk range. When the inner side is built bottom up, it will return the indexJoinInfo, which contains the runtime
 // information that this physical index join wants. That's introduce second function called completePhysicalIndexJoin, which will
+// calcOuterExpectedCnt computes the expected row count for the outer child of
+// an ordered join (IndexJoin or Apply) given the parent's ExpectedCnt. It
+// accounts for the OptOrderingIdxSelRatio to model extra outer rows that may
+// need to be scanned before the inner side produces enough matching rows.
+func calcOuterExpectedCnt(sctx base.PlanContext, prop *property.PhysicalProperty, outerRowCount, estimatedRowCount float64) float64 {
+	orderRatio := sctx.GetSessionVars().OptOrderingIdxSelRatio
+	sctx.GetSessionVars().RecordRelevantOptVar(vardef.TiDBOptOrderingIdxSelRatio)
+	if (prop.ExpectedCnt < estimatedRowCount) ||
+		(orderRatio > 0 && outerRowCount > estimatedRowCount && prop.ExpectedCnt < outerRowCount && estimatedRowCount > 0) {
+		rowsToMeetFirst := max(0.0, (outerRowCount-estimatedRowCount)*orderRatio)
+		expCntScale := prop.ExpectedCnt / estimatedRowCount
+		return (outerRowCount * expCntScale) + rowsToMeetFirst
+	}
+	return math.MaxFloat64
+}
+
 // fill physicalIndexJoin about all the runtime information it lacks in static enumeration phase.
 func constructIndexJoinStatic(
 	p *logicalop.LogicalJoin,
@@ -271,22 +287,11 @@ func constructIndexJoinStatic(
 		innerJoinKeys, outerJoinKeys, isNullEQ, _ = p.GetJoinKeys()
 	}
 	chReqProps := make([]*property.PhysicalProperty, 2)
-	// outer side expected cnt will be amplified by the prop.ExpectedCnt / p.StatsInfo().RowCount with same ratio.
-	chReqProps[outerIdx] = &property.PhysicalProperty{TaskTp: property.RootTaskType, ExpectedCnt: math.MaxFloat64,
-		SortItems: prop.SortItems, CTEProducerStatus: prop.CTEProducerStatus, NoCopPushDown: prop.NoCopPushDown}
-	orderRatio := p.SCtx().GetSessionVars().OptOrderingIdxSelRatio
-	// Record the variable usage for explain explore.
-	p.SCtx().GetSessionVars().RecordRelevantOptVar(vardef.TiDBOptOrderingIdxSelRatio)
-	outerRowCount := outerStats.RowCount
-	estimatedRowCount := p.StatsInfo().RowCount
-	if (prop.ExpectedCnt < estimatedRowCount) ||
-		(orderRatio > 0 && outerRowCount > estimatedRowCount && prop.ExpectedCnt < outerRowCount && estimatedRowCount > 0) {
-		// Apply the orderRatio to recognize that a large outer table scan may
-		// read additional rows before the inner table reaches the limit values
-		rowsToMeetFirst := max(0.0, (outerRowCount-estimatedRowCount)*orderRatio)
-		expCntScale := prop.ExpectedCnt / estimatedRowCount
-		expectedCnt := (outerRowCount * expCntScale) + rowsToMeetFirst
-		chReqProps[outerIdx].ExpectedCnt = expectedCnt
+	chReqProps[outerIdx] = &property.PhysicalProperty{TaskTp: property.RootTaskType,
+		ExpectedCnt:       calcOuterExpectedCnt(p.SCtx(), prop, outerStats.RowCount, p.StatsInfo().RowCount),
+		SortItems:         prop.SortItems,
+		CTEProducerStatus: prop.CTEProducerStatus,
+		NoCopPushDown:     prop.NoCopPushDown,
 	}
 
 	// inner side should pass down the indexJoinProp, which contains the runtime constant inner key, which is used to build the underlying index/pk range.

@@ -15,7 +15,6 @@
 package executor_test
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -534,13 +533,13 @@ func TestParallelApplyCancelInflight(t *testing.T) {
 
 	// The failpoint makes each inner execution sleep 1s but respects
 	// context cancellation, so cancelled workers return immediately.
-	// We also set initCap=1 and maxChunkSize=1 via failpoint so that
-	// each result chunk holds only 1 row. This forces workers to
-	// produce results after every matching outer row, creating
-	// backpressure that lets Close() fire while workers are still
-	// processing.
-	// Without cancellation: 20 rows / 3 workers * 1s ≈ 7s.
-	// With cancellation: ~2-3s (first result produced + cancel).
+	// We set initCap=1 and maxChunkSize=1 via failpoint so that each
+	// result chunk holds only 1 row. This forces workers to produce
+	// results after every matching outer row, so LIMIT 1 can close
+	// after the very first result. At that point up to 3 workers
+	// (concurrency) may be sleeping in the failpoint; with
+	// cancellation they abort immediately (~1s total), without it
+	// all 20 rows would be processed (~7s).
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/internal/exec/initCap", `return(1)`))
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/internal/exec/maxChunkSize", `return(1)`))
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/parallelApplySlowInner", `return(1000)`))
@@ -552,15 +551,17 @@ func TestParallelApplyCancelInflight(t *testing.T) {
 
 	// LIMIT 1: once one row is produced, Close() fires and should cancel
 	// in-flight inner workers via context cancellation.
-	// Use MustQueryWithContext to avoid the double-execution that
-	// MustQuery performs (skipExtractor path).
 	start := time.Now()
-	rows := tk.MustQueryWithContext(context.Background(), sql).Rows()
+	rows := tk.MustQuery(sql).Rows()
 	elapsed := time.Since(start)
 
 	// We got exactly 1 row.
 	require.Len(t, rows, 1)
-	require.Less(t, elapsed, 5*time.Second, "query took too long (%v); cancel-in-flight may not be working", elapsed)
+	// With cancellation the query completes in ~1s (first matching row
+	// produced, then cancel aborts the other sleeping workers). Without
+	// cancellation the 3 in-flight workers would each complete their
+	// full 1s sleep sequentially through backpressure (~3s+).
+	require.Less(t, elapsed, 3*time.Second, "query took too long (%v); cancel-in-flight may not be working", elapsed)
 }
 
 func TestOrderedParallelApply(t *testing.T) {

@@ -193,6 +193,11 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 	}
 
 	if atomic.CompareAndSwapUint32(&e.started, 0, 1) {
+		// workerCtx is a cancellable child of ctx. Close() calls
+		// cancelWorkers() to abort in-flight inner/outer workers
+		// (e.g. for LIMIT queries). Coordination goroutines
+		// (notifyWorker, bridge) use the parent ctx instead, since
+		// they must outlive the workers to perform cleanup.
 		workerCtx, cancelWorkers := context.WithCancel(ctx)
 		e.cancelWorkers = cancelWorkers
 		e.workerWg.Add(1)
@@ -221,7 +226,7 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 				go e.innerWorker(workerCtx, workID)
 			}
 			e.notifyWg.Add(1)
-			go e.notifyWorker(ctx)
+			go e.notifyWorker(ctx) // deliberately uses ctx, not workerCtx (see above)
 		}
 	}
 	result := <-e.resultChkCh

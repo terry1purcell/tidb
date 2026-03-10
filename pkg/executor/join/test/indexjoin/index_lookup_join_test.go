@@ -364,8 +364,14 @@ func TestIndexHashJoinLimitBatchSize(t *testing.T) {
 	var maxOuterRows int64
 	require.NoError(t, failpoint.EnableCall("github.com/pingcap/tidb/pkg/executor/join/testIndexJoinOuterRowsFetched",
 		func(outerRows int) {
-			if int64(outerRows) > atomic.LoadInt64(&maxOuterRows) {
-				atomic.StoreInt64(&maxOuterRows, int64(outerRows))
+			for {
+				old := atomic.LoadInt64(&maxOuterRows)
+				if int64(outerRows) <= old {
+					break
+				}
+				if atomic.CompareAndSwapInt64(&maxOuterRows, old, int64(outerRows)) {
+					break
+				}
 			}
 		},
 	))
@@ -379,12 +385,19 @@ func TestIndexHashJoinLimitBatchSize(t *testing.T) {
 	sql := "select /*+ INL_HASH_JOIN(t2) */ * from t1 where exists " +
 		"(select 1 from t2 where t2.b = t1.b) order by t1.a limit 100"
 
+	// Verify the plan uses IndexHashJoin.
+	tk.MustHavePlan(sql, "IndexHashJoin")
+
 	// Verify correctness.
 	rows := tk.MustQuery(sql).Rows()
 	require.Len(t, rows, 100)
 	// First row should be a=1 (ordered by PK).
 	require.Equal(t, "1", rows[0][0].(string))
 	require.Equal(t, "100", rows[99][0].(string))
+
+	// Verify the failpoint was actually hit (i.e., batching occurred).
+	require.Greater(t, atomic.LoadInt64(&maxOuterRows), int64(0),
+		"failpoint was never triggered — IndexHashJoin batching may not have been exercised")
 
 	// Each batch should fetch close to the pinned batch size (100 rows).
 	// Allow some slack for chunk-size alignment, but it must be well under

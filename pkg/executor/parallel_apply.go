@@ -200,7 +200,7 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 		if e.keepOrder {
 			for i := range e.concurrency {
 				e.workerWg.Add(1)
-				go e.innerWorkerOrdered(ctx, i)
+				go e.innerWorkerOrdered(workerCtx, i)
 			}
 			// Bridge goroutine: when all outer+inner workers finish,
 			// close orderedResultCh so the reorder worker can drain and exit.
@@ -218,10 +218,10 @@ func (e *ParallelNestedLoopApplyExec) Next(ctx context.Context, req *chunk.Chunk
 			for i := range e.concurrency {
 				e.workerWg.Add(1)
 				workID := i
-				go e.innerWorker(ctx, workID)
+				go e.innerWorker(workerCtx, workID)
 			}
 			e.notifyWg.Add(1)
-			go e.notifyWorker(workerCtx)
+			go e.notifyWorker(ctx) // deliberately uses parent ctx, not workerCtx
 		}
 	}
 	result := <-e.resultChkCh

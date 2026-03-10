@@ -82,8 +82,8 @@ type ParallelNestedLoopApplyExec struct {
 	// fields about concurrency control
 	concurrency int
 	keepOrder   bool // when true, use reorder buffer to preserve outer-side ordering
-	startMu sync.Mutex
-	started uint32 // 0 = not started, 1 = started; accessed atomically for fast-path
+	startMu     sync.Mutex
+	started     uint32 // 0 = not started, 1 = started; accessed atomically for fast-path
 	drained     uint32 // drained == true indicates there is no more data
 	freeChkCh   chan *chunk.Chunk
 	resultChkCh chan result

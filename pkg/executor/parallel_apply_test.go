@@ -15,6 +15,7 @@
 package executor_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -531,30 +532,35 @@ func TestParallelApplyCancelInflight(t *testing.T) {
 	sql := "select * from (select t1.a from t1 where exists (select /*+ NO_DECORRELATE() */ 1 from t2 where t2.a < t1.a)) sub limit 1"
 	checkApplyPlan(t, tk, sql, 3)
 
-	// The failpoint makes each inner execution sleep 300ms but respects
+	// The failpoint makes each inner execution sleep 1s but respects
 	// context cancellation, so cancelled workers return immediately.
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/parallelApplySlowInner", `return(300)`))
+	// We also set initCap=1 and maxChunkSize=1 via failpoint so that
+	// each result chunk holds only 1 row. This forces workers to
+	// produce results after every matching outer row, creating
+	// backpressure that lets Close() fire while workers are still
+	// processing.
+	// Without cancellation: 20 rows / 3 workers * 1s ≈ 7s.
+	// With cancellation: ~2-3s (first result produced + cancel).
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/internal/exec/initCap", `return(1)`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/internal/exec/maxChunkSize", `return(1)`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/parallelApplySlowInner", `return(1000)`))
 	defer func() {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/parallelApplySlowInner"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/internal/exec/initCap"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/internal/exec/maxChunkSize"))
 	}()
 
 	// LIMIT 1: once one row is produced, Close() fires and should cancel
 	// in-flight inner workers via context cancellation.
+	// Use MustQueryWithContext to avoid the double-execution that
+	// MustQuery performs (skipExtractor path).
 	start := time.Now()
-	rows := tk.MustQuery(sql).Rows()
+	rows := tk.MustQueryWithContext(context.Background(), sql).Rows()
 	elapsed := time.Since(start)
 
 	// We got exactly 1 row.
 	require.Len(t, rows, 1)
-	// Without cancel-in-flight, all 20 outer rows would be processed
-	// (~2s per run). With cancellation, Close() fires after the first
-	// result and aborts workers sleeping in the failpoint via context
-	// cancellation. Note: fillInnerChunk may process multiple outer
-	// rows per call, so the effective savings depend on how many rows
-	// are in-flight when cancel fires. The 3s threshold is generous
-	// enough to avoid CI flakiness while catching regressions where
-	// cancellation is completely broken.
-	require.Less(t, elapsed, 3*time.Second, "query took too long (%v); cancel-in-flight may not be working", elapsed)
+	require.Less(t, elapsed, 5*time.Second, "query took too long (%v); cancel-in-flight may not be working", elapsed)
 }
 
 func TestOrderedParallelApply(t *testing.T) {

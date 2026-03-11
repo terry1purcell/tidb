@@ -1621,11 +1621,9 @@ func TestLimitPushdown(t *testing.T) {
 		})
 		statsTbl.ColAndIdxExistenceMap.InsertIndex(idx.ID, true)
 	}
-	h := dom.StatsHandle()
-	h.UpdateStatsCache(statstypes.CacheUpdate{
+	dom.StatsHandle().UpdateStatsCache(statstypes.CacheUpdate{
 		Updated: []*statistics.Table{statsTbl},
 	})
-	require.NoError(t, h.Update(context.Background(), is))
 
 	var input []string
 	var output []struct {

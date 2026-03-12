@@ -2099,24 +2099,31 @@ func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, bool, error) {
 
 	// Skip if the inner child has low duplication on join key columns.
 	// When NDV is close to the row count, dedup adds overhead with little benefit.
-	if innerStats := innerChild.StatsInfo(); innerStats != nil && innerStats.RowCount > 0 {
-		// Compute the max NDV across the join key columns. The number of distinct
-		// key combinations is at most min(NDV(col_i)), but using max gives a
-		// conservative (less aggressive) estimate of duplication.
-		maxNDV := float64(0)
-		for _, col := range innerKeyCols {
-			if ndv, ok := innerStats.ColNDVs[col.UniqueID]; ok && ndv > maxNDV {
-				maxNDV = ndv
-			}
+	// Also skip when stats are unavailable (pseudo stats) as a conservative default,
+	// since injecting an aggregation can cause plan regressions (e.g., blocking
+	// IndexJoin or shifting the optimizer toward more expensive TiFlash plans).
+	innerStats := innerChild.StatsInfo()
+	if innerStats == nil || innerStats.RowCount <= 0 {
+		return p.Self(), false, nil
+	}
+	// Compute the max NDV across the join key columns. The number of distinct
+	// key combinations is at most min(NDV(col_i)), but using max gives a
+	// conservative (less aggressive) estimate of duplication.
+	maxNDV := float64(0)
+	for _, col := range innerKeyCols {
+		if ndv, ok := innerStats.ColNDVs[col.UniqueID]; ok && ndv > maxNDV {
+			maxNDV = ndv
 		}
-		// dupRatio = rows / NDV. A ratio near 1.0 means almost no duplicates.
-		// Only insert dedup when there's meaningful duplication (ratio >= 2.0).
-		if maxNDV > 0 {
-			dupRatio := innerStats.RowCount / maxNDV
-			if dupRatio < 2.0 {
-				return p.Self(), false, nil
-			}
-		}
+	}
+	// dupRatio = rows / NDV. A ratio near 1.0 means almost no duplicates.
+	// Only insert dedup when there's meaningful duplication (ratio >= 2.0).
+	// When NDV is unavailable (maxNDV == 0), skip conservatively.
+	if maxNDV <= 0 {
+		return p.Self(), false, nil
+	}
+	dupRatio := innerStats.RowCount / maxNDV
+	if dupRatio < 2.0 {
+		return p.Self(), false, nil
 	}
 
 	// Push RightConditions below the aggregation as a Selection.

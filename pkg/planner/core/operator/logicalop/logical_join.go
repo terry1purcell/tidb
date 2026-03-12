@@ -2056,27 +2056,34 @@ func (p *LogicalJoin) SemiJoinRewrite() (base.LogicalPlan, error) {
 // This is only safe when there are no OtherConditions (non-equi conditions that
 // reference both sides), because different inner rows with the same join key could
 // produce different results for such conditions.
-func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, error) {
+func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, bool, error) {
 	// Only for semi/anti-semi join types.
 	if p.JoinType != base.SemiJoin && p.JoinType != base.AntiSemiJoin &&
 		p.JoinType != base.LeftOuterSemiJoin && p.JoinType != base.AntiLeftOuterSemiJoin {
-		return p.Self(), nil
+		return p.Self(), false, nil
 	}
 	// Skip correlated semi joins (LogicalApply).
 	if _, ok := p.Self().(*LogicalApply); ok {
-		return p.Self(), nil
+		return p.Self(), false, nil
+	}
+	// The dedup aggregation becomes the inner child of the join. IndexJoin
+	// admission (admitIndexJoinInnerChildPattern) rejects LogicalAggregation
+	// unless tidb_enable_inl_join_inner_multi_pattern is ON. Skip dedup when
+	// the sysvar is OFF to avoid silently losing IndexJoin candidates.
+	if !p.SCtx().GetSessionVars().EnableINLJoinInnerMultiPattern {
+		return p.Self(), false, nil
 	}
 	// Must have equi-join conditions.
 	if len(p.EqualConditions) == 0 {
-		return p.Self(), nil
+		return p.Self(), false, nil
 	}
 	// Cannot have non-equi conditions — dedup would change semantics.
 	if len(p.OtherConditions) > 0 {
-		return p.Self(), nil
+		return p.Self(), false, nil
 	}
 	// Cannot have null-aware conditions.
 	if len(p.NAEQConditions) > 0 {
-		return p.Self(), nil
+		return p.Self(), false, nil
 	}
 
 	innerChild := p.Children()[1]
@@ -2093,7 +2100,7 @@ func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, error) {
 	innerKeySchema := expression.NewSchema(innerKeyCols...)
 	for _, key := range innerChild.Schema().PKOrUK {
 		if innerKeySchema.ColumnsIndices(key) != nil {
-			return p.Self(), nil
+			return p.Self(), false, nil
 		}
 	}
 
@@ -2114,7 +2121,7 @@ func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, error) {
 		if maxNDV > 0 {
 			dupRatio := innerStats.RowCount / maxNDV
 			if dupRatio < 2.0 {
-				return p.Self(), nil
+				return p.Self(), false, nil
 			}
 		}
 	}
@@ -2124,6 +2131,13 @@ func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, error) {
 		sel := LogicalSelection{Conditions: make([]expression.Expression, len(p.RightConditions))}.Init(p.SCtx(), innerChild.QueryBlockOffset())
 		copy(sel.Conditions, p.RightConditions)
 		sel.SetChildren(innerChild)
+		// Derive stats for the selection so the downstream aggregation can use them.
+		if innerChild.StatsInfo() != nil {
+			childStats := []*property.StatsInfo{innerChild.StatsInfo()}
+			if _, _, err := sel.DeriveStats(childStats, sel.Schema(), []*expression.Schema{innerChild.Schema()}, nil); err != nil {
+				return nil, false, err
+			}
+		}
 		innerChild = sel
 		p.RightConditions = nil
 	}
@@ -2139,7 +2153,7 @@ func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, error) {
 		innerCol := p.EqualConditions[i].GetArgs()[1].(*expression.Column)
 		firstRow, err := aggregation.NewAggFuncDesc(p.SCtx().GetExprCtx(), ast.AggFuncFirstRow, []expression.Expression{innerCol}, false)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		subAgg.AggFuncs = append(subAgg.AggFuncs, firstRow)
 		subAgg.GroupByItems = append(subAgg.GroupByItems, innerCol)
@@ -2154,13 +2168,13 @@ func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, error) {
 		childStats := []*property.StatsInfo{innerChild.StatsInfo()}
 		childSchema := []*expression.Schema{innerChild.Schema()}
 		if _, _, err := subAgg.DeriveStats(childStats, subAgg.Schema(), childSchema, nil); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
 	// Replace inner child with the deduplicated aggregation.
 	p.SetChildren(p.Children()[0], subAgg)
-	return p.Self(), nil
+	return p.Self(), true, nil
 }
 
 // containDifferentJoinTypes checks whether `PreferJoinType` contains different

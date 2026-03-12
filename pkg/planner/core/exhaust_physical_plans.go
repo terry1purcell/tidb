@@ -2712,15 +2712,6 @@ func tryToGetMppHashJoin(super base.LogicalPlan, prop *property.PhysicalProperty
 func exhaustPhysicalPlans4LogicalJoin(super base.LogicalPlan, prop *property.PhysicalProperty) ([]base.PhysicalPlan, bool, error) {
 	ge, p := base.GetGEAndLogicalOp[*logicalop.LogicalJoin](super)
 
-	// For semi/anti-semi joins, deduplicate the inner child on join key columns.
-	// This reduces the inner side cardinality for HashJoin and MergeJoin, which use
-	// the logical inner child. IndexJoin variants construct their own inner plan from
-	// the DataSource index paths and are unaffected by this aggregation.
-	// The SemiJoinInnerDedup method has guards to avoid duplicate aggregations.
-	if _, err := p.SemiJoinInnerDedup(); err != nil {
-		return nil, false, err
-	}
-
 	if !isJoinHintSupportedInMPPMode(p.PreferJoinType) {
 		if hasMPPJoinHints(p.PreferJoinType) {
 			// If there are MPP hints but has some conflicts join method hints, all the join hints are invalid.
@@ -2775,13 +2766,10 @@ func exhaustPhysicalPlans4LogicalJoin(super base.LogicalPlan, prop *property.Phy
 
 	if !p.IsNAAJ() {
 		// naaj refuse merge join and index join.
-		stats0, stats1, _, _ := getJoinChildStatsAndSchema(ge, p)
-		mergeJoins := physicalop.GetMergeJoin(p, prop, p.Schema(), p.StatsInfo(), stats0, stats1)
-		if (p.PreferJoinType&h.PreferMergeJoin) > 0 && len(mergeJoins) > 0 {
-			return mergeJoins, true, nil
-		}
-		joins = append(joins, mergeJoins...)
-
+		// Enumerate IndexJoin FIRST with the original inner child, before
+		// SemiJoinInnerDedup mutates p.Children()[1]. IndexJoin variants
+		// construct their inner plan from DataSource index paths and need
+		// to see the original inner child, not a LogicalAggregation wrapper.
 		if p.SCtx().GetSessionVars().EnhanceIndexJoinBuildV2 {
 			indexJoins := tryToEnumerateIndexJoin(super, prop)
 			joins = append(joins, indexJoins...)
@@ -2804,6 +2792,32 @@ func exhaustPhysicalPlans4LogicalJoin(super base.LogicalPlan, prop *property.Phy
 			}
 			joins = append(joins, indexJoins...)
 		}
+
+		// For semi/anti-semi joins, deduplicate the inner child on join key columns.
+		// This reduces the inner side cardinality for HashJoin and MergeJoin, which
+		// use the logical inner child. This is called after IndexJoin enumeration so
+		// that index-join enumerators see the original inner child (DataSource), not
+		// the injected LogicalAggregation wrapper.
+		//
+		// Gate on ge == nil (volcano path only). Under cascades, the physical plan
+		// builder iterates ge.Inputs (memo groups), not p.Children(), so the
+		// in-place mutation would be silently ignored.
+		if ge == nil {
+			if _, changed, err := p.SemiJoinInnerDedup(); err != nil {
+				return nil, false, err
+			} else if changed {
+				// Recompute possible properties so MergeJoin/StreamAgg see correct
+				// sort orders from the new inner subtree.
+				preparePossibleProperties(p.Self())
+			}
+		}
+
+		stats0, stats1, _, _ := getJoinChildStatsAndSchema(ge, p)
+		mergeJoins := physicalop.GetMergeJoin(p, prop, p.Schema(), p.StatsInfo(), stats0, stats1)
+		if (p.PreferJoinType&h.PreferMergeJoin) > 0 && len(mergeJoins) > 0 {
+			return mergeJoins, true, nil
+		}
+		joins = append(joins, mergeJoins...)
 	}
 
 	hashJoins, forced := getHashJoins(super, prop)

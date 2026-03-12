@@ -156,7 +156,7 @@
           "└─HashJoin(Probe) 1.00 root  inner join, equal:[eq(test.t.b, test.tp.c)]",
           "  ├─TableReader(Build) 1.00 root  data:Selection",
           "  │ └─Selection 1.00 cop[tikv]  gt(test.t.b, 10), not(isnull(test.t.b))",
-          "  │   └─TableRangeScan 1.00 cop[tikv] table:t range:[-inf,10), keep order:false, stats:partial[a:allEvicted]",
+          "  │   └─TableRangeScan 3.00 cop[tikv] table:t range:[-inf,10), keep order:false",
           "  └─TableReader(Probe) 4.00 root partition:p0 data:Selection",
           "    └─Selection 4.00 cop[tikv]  gt(test.tp.c, 10), not(isnull(test.tp.c))",
           "      └─TableFullScan 6.00 cop[tikv] table:tp keep order:false"

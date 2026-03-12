@@ -117,14 +117,15 @@ func TestSemiJoinInnerDedup(t *testing.T) {
 		"select id from outer_t where id in (select oid from inner_t) order by id",
 	).Check(testkit.Rows("1", "2", "3"))
 
-	// When sysvar is OFF, dedup should NOT fire (IndexJoin guard).
+	// Dedup fires regardless of tidb_enable_inl_join_inner_multi_pattern
+	// because IndexJoin is enumerated before dedup in exhaustPhysicalPlans.
 	tk.MustExec("set @@tidb_enable_inl_join_inner_multi_pattern = off")
-	tk.MustNotHavePlan(
+	tk.MustHavePlan(
 		"select * from outer_t where exists (select 1 from inner_t where outer_t.id = inner_t.oid)",
 		"HashAgg",
 	)
 
-	// Correctness is preserved even without dedup.
+	// Correctness is preserved with dedup and sysvar OFF.
 	tk.MustQuery(
 		"select id from outer_t where exists (select 1 from inner_t where outer_t.id = inner_t.oid) order by id",
 	).Check(testkit.Rows("1", "2", "3"))

@@ -2066,13 +2066,6 @@ func (p *LogicalJoin) SemiJoinInnerDedup() (base.LogicalPlan, bool, error) {
 	if _, ok := p.Self().(*LogicalApply); ok {
 		return p.Self(), false, nil
 	}
-	// The dedup aggregation becomes the inner child of the join. IndexJoin
-	// admission (admitIndexJoinInnerChildPattern) rejects LogicalAggregation
-	// unless tidb_enable_inl_join_inner_multi_pattern is ON. Skip dedup when
-	// the sysvar is OFF to avoid silently losing IndexJoin candidates.
-	if !p.SCtx().GetSessionVars().EnableINLJoinInnerMultiPattern {
-		return p.Self(), false, nil
-	}
 	// Must have equi-join conditions.
 	if len(p.EqualConditions) == 0 {
 		return p.Self(), false, nil

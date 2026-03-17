@@ -34,7 +34,13 @@ func init() {
 
 // GetRowCountByColumnRanges estimates the row count by a slice of Range.
 // PKIsHandle indicates whether the column is the single primary key column.
+// Results from valid (non-pseudo) column stats are cached on the HistColl
+// so that subsequent calls with the same column and ranges can skip recomputation.
 func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistColl, colUniqueID int64, colRanges []*ranger.Range, pkIsHandle bool) (result statistics.RowEstimate, err error) {
+	// Check cache first.
+	if cached, ok := coll.LookupColEstimate(colUniqueID, colRanges, pkIsHandle); ok {
+		return cached, nil
+	}
 	sc := sctx.GetSessionVars().StmtCtx
 	c := coll.GetCol(colUniqueID)
 	colInfoID := colUniqueID
@@ -43,6 +49,8 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 	}
 	recordUsedItemStatsStatus(sctx, c, coll.PhysicalID, colInfoID)
 	if statistics.ColumnStatsIsInvalid(c, sctx, coll, colUniqueID) {
+		// Do not cache pseudo/invalid results — they should not be reused
+		// by index estimation paths that require real column stats.
 		var pseudoResult float64
 		if pkIsHandle {
 			if len(colRanges) == 0 {
@@ -65,7 +73,57 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 	if err != nil {
 		return statistics.DefaultRowEst(0), errors.Trace(err)
 	}
+	// Cache the result from valid column stats.
+	coll.StoreColEstimate(colUniqueID, colRanges, pkIsHandle, result)
 	return result, nil
+}
+
+// tryColumnEstimateForSingleColRanges checks whether column statistics can be
+// used instead of index statistics for the given single-column ranges. This is
+// preferred over index histogram estimation because column histograms retain
+// original data types, avoiding the lossy string encoding that index histograms
+// use.
+//
+// Returns (result, true) if column stats are valid and the estimate was
+// produced. Returns (zero, false) if column stats are unavailable, the ranges
+// are not single-column, or the index uses a prefix length on the column, in
+// which case the caller should fall back to index-based estimation.
+func tryColumnEstimateForSingleColRanges(
+	sctx planctx.PlanContext,
+	coll *statistics.HistColl,
+	idx *statistics.Index,
+	indexRanges []*ranger.Range,
+) (statistics.RowEstimate, bool) {
+	if coll == nil || len(indexRanges) == 0 {
+		return statistics.RowEstimate{}, false
+	}
+	// All ranges must be single-column.
+	for _, r := range indexRanges {
+		if len(r.LowVal) != 1 {
+			return statistics.RowEstimate{}, false
+		}
+	}
+	// Not applicable for prefix indexes — ranges are truncated to the prefix
+	// length, so column-level ranges would not match.
+	if idx.Info.Columns[0].Length != types.UnspecifiedLength {
+		return statistics.RowEstimate{}, false
+	}
+	colIDs := coll.Idx2ColUniqueIDs[idx.Histogram.ID]
+	if len(colIDs) == 0 {
+		return statistics.RowEstimate{}, false
+	}
+	colID := colIDs[0]
+	// Check column stats validity — do not use pseudo estimates here.
+	c := coll.GetCol(colID)
+	if statistics.ColumnStatsIsInvalid(c, sctx, coll, colID) {
+		return statistics.RowEstimate{}, false
+	}
+	// Compute or retrieve from cache.
+	result, err := GetRowCountByColumnRanges(sctx, coll, colID, indexRanges, false)
+	if err != nil {
+		return statistics.RowEstimate{}, false
+	}
+	return result, true
 }
 
 // equalRowCountOnColumn estimates the row count by a slice of Range and a Datum.

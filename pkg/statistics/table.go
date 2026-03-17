@@ -241,6 +241,63 @@ type HistColl struct {
 	// For normal index, the column id is enough, as we already have in Idx2ColUniqueIDs. But currently, mv index needs more
 	// information to match the filter against the mv index columns, and we need this map to provide this information.
 	MVIdx2Columns map[int64][]*expression.Column
+	// ColEstimateCache caches results from GetRowCountByColumnRanges.
+	// Only populated when column stats are valid (non-pseudo, loaded).
+	// Key: colUniqueID. Value: list of (ranges, pkIsHandle, result) entries.
+	ColEstimateCache map[int64][]ColEstimateCacheEntry
+}
+
+// ColEstimateCacheEntry stores a cached column range estimate result.
+type ColEstimateCacheEntry struct {
+	Ranges        []*ranger.Range
+	PkIsHandle    bool
+	RealtimeCount int64
+	ModifyCount   int64
+	Result        RowEstimate
+}
+
+// StoreColEstimate caches a column range estimate result.
+// Ranges are cloned to avoid cache corruption if the caller mutates them.
+func (coll *HistColl) StoreColEstimate(colID int64, ranges []*ranger.Range, pkIsHandle bool, result RowEstimate) {
+	if coll.ColEstimateCache == nil {
+		coll.ColEstimateCache = make(map[int64][]ColEstimateCacheEntry)
+	}
+	cloned := make([]*ranger.Range, len(ranges))
+	for i, r := range ranges {
+		cloned[i] = r.Clone()
+	}
+	coll.ColEstimateCache[colID] = append(coll.ColEstimateCache[colID], ColEstimateCacheEntry{
+		Ranges:        cloned,
+		PkIsHandle:    pkIsHandle,
+		RealtimeCount: coll.RealtimeCount,
+		ModifyCount:   coll.ModifyCount,
+		Result:        result,
+	})
+}
+
+// LookupColEstimate returns a cached column estimate if one exists
+// for the given column, ranges, and pkIsHandle.
+func (coll *HistColl) LookupColEstimate(colID int64, ranges []*ranger.Range, pkIsHandle bool) (RowEstimate, bool) {
+	entries := coll.ColEstimateCache[colID]
+	for _, e := range entries {
+		if e.PkIsHandle != pkIsHandle ||
+			e.RealtimeCount != coll.RealtimeCount ||
+			e.ModifyCount != coll.ModifyCount ||
+			len(e.Ranges) != len(ranges) {
+			continue
+		}
+		match := true
+		for i := range ranges {
+			if !ranges[i].Equal(e.Ranges[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return e.Result, true
+		}
+	}
+	return RowEstimate{}, false
 }
 
 // NewHistColl creates a new HistColl.

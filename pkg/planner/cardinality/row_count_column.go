@@ -17,6 +17,7 @@ package cardinality
 import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/core/cost"
 	"github.com/pingcap/tidb/pkg/planner/planctx"
 	"github.com/pingcap/tidb/pkg/statistics"
@@ -108,6 +109,14 @@ func tryColumnEstimateForSingleColRanges(
 	if idx.Info.Columns[0].Length != types.UnspecifiedLength {
 		return statistics.RowEstimate{}, false
 	}
+	// Not applicable for partial indexes (ConditionExprString != "") — column
+	// stats cover all rows, but a partial index only covers rows satisfying its
+	// predicate, so the estimates would not match.
+	// Not applicable for MV indexes — a single row can produce multiple index
+	// entries, so column-level cardinality does not reflect index row counts.
+	if idx.Info.ConditionExprString != "" || idx.Info.MVIndex {
+		return statistics.RowEstimate{}, false
+	}
 	colIDs := coll.Idx2ColUniqueIDs[idx.Histogram.ID]
 	if len(colIDs) == 0 {
 		return statistics.RowEstimate{}, false
@@ -117,6 +126,23 @@ func tryColumnEstimateForSingleColRanges(
 	c := coll.GetCol(colID)
 	if statistics.ColumnStatsIsInvalid(c, sctx, coll, colID) {
 		return statistics.RowEstimate{}, false
+	}
+	// For a unique non-nullable index where all ranges are non-null point
+	// probes, the index-based path returns exactly 1 per range, which is more
+	// accurate than histogram estimation. Bail out so the caller can use that
+	// path instead.
+	if idx.Info.Unique && mysql.HasNotNullFlag(c.Info.GetFlag()) {
+		tc := sctx.GetSessionVars().StmtCtx.TypeCtx()
+		allPoints := true
+		for _, r := range indexRanges {
+			if !r.IsPointNonNullable(tc) {
+				allPoints = false
+				break
+			}
+		}
+		if allPoints {
+			return statistics.RowEstimate{}, false
+		}
 	}
 	// Compute or retrieve from cache.
 	result, err := GetRowCountByColumnRanges(sctx, coll, colID, indexRanges, false)

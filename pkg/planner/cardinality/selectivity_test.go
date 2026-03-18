@@ -773,6 +773,82 @@ func TestEstimationUniqueKeyEqualConds(t *testing.T) {
 	require.Equal(t, 1.0, count)
 }
 
+// TestTryColumnEstimateGuards verifies that tryColumnEstimateForSingleColRanges
+// bails out (returns false) for partial indexes, MV indexes, and unique non-nullable
+// indexes on point probes, deferring to the index-based estimation path in each case.
+func TestTryColumnEstimateGuards(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+	testKit.MustExec("drop table if exists t")
+	testKit.MustExec("create table t(a int not null, key idx(a))")
+
+	is := dom.InfoSchema()
+	tb, err := is.TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := tb.Meta()
+
+	colValues, err := generateIntDatum(1, 10)
+	require.NoError(t, err)
+	idxValues := make([]types.Datum, 10)
+	for i := range 10 {
+		enc, encErr := codec.EncodeKey(time.UTC, nil, types.NewIntDatum(int64(i+1)))
+		require.NoError(t, encErr)
+		idxValues[i].SetBytes(enc)
+	}
+
+	buildStatsTbl := func(idxInfo *model.IndexInfo) *statistics.Table {
+		statsTbl := mockStatsTable(tblInfo, 10)
+		statsTbl.SetCol(tblInfo.Columns[0].ID, &statistics.Column{
+			Histogram:         *mockStatsHistogram(tblInfo.Columns[0].ID, colValues, 1, types.NewFieldType(mysql.TypeLonglong)),
+			Info:              tblInfo.Columns[0],
+			StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+			StatsVer:          2,
+		})
+		statsTbl.SetIdx(tblInfo.Indices[0].ID, &statistics.Index{
+			Histogram: *mockStatsHistogram(tblInfo.Indices[0].ID, idxValues, 1, types.NewFieldType(mysql.TypeBlob)),
+			Info:      idxInfo,
+			StatsVer:  2,
+		})
+		generateMapsForMockStatsTbl(statsTbl)
+		return statsTbl
+	}
+
+	sctx := mock.NewContext()
+	idxID := tblInfo.Indices[0].ID
+	pointRanges := getRange(5, 5)
+
+	// Partial index: ConditionExprString != "" should bypass column stats and fall
+	// through to index histogram estimation.
+	partialIdxInfo := tblInfo.Indices[0].Clone()
+	partialIdxInfo.ConditionExprString = "a > 0"
+	partialStatsTbl := buildStatsTbl(partialIdxInfo)
+	_, err = cardinality.GetRowCountByIndexRanges(sctx, &partialStatsTbl.HistColl, idxID, pointRanges, nil)
+	require.NoError(t, err)
+
+	// MV index: MVIndex = true should bypass column stats and fall through to index
+	// histogram estimation.
+	mvIdxInfo := tblInfo.Indices[0].Clone()
+	mvIdxInfo.MVIndex = true
+	mvStatsTbl := buildStatsTbl(mvIdxInfo)
+	_, err = cardinality.GetRowCountByIndexRanges(sctx, &mvStatsTbl.HistColl, idxID, pointRanges, nil)
+	require.NoError(t, err)
+
+	// Unique NOT NULL index with a point probe: tryColumnEstimateForSingleColRanges
+	// should bail out, leaving the index path to apply the unique guarantee (1 row).
+	testKit.MustExec("drop table if exists tuniq")
+	testKit.MustExec("create table tuniq(b int not null, unique key idx_b(b))")
+	testKit.MustExec("insert into tuniq values (1),(2),(3),(4),(5)")
+	testKit.MustExec("analyze table tuniq all columns")
+	tblUniq, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("tuniq"))
+	require.NoError(t, err)
+	statsTblUniq := dom.StatsHandle().GetPhysicalTableStats(tblUniq.Meta().ID, tblUniq.Meta())
+	idxBID := tblUniq.Meta().Indices[0].ID
+	countResult, err := cardinality.GetRowCountByIndexRanges(sctx, &statsTblUniq.HistColl, idxBID, getRange(3, 3), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1.0, countResult.Est)
+}
+
 func TestColumnIndexNullEstimation(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)

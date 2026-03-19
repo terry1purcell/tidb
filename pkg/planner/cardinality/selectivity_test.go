@@ -825,6 +825,8 @@ func TestTryColumnEstimateGuards(t *testing.T) {
 	partialStatsTbl := buildStatsTbl(partialIdxInfo)
 	_, err = cardinality.GetRowCountByIndexRanges(sctx, &partialStatsTbl.HistColl, idxID, pointRanges, nil)
 	require.NoError(t, err)
+	// Guard fired before column path: no cache written.
+	require.Nil(t, partialStatsTbl.HistColl.ColEstimateCache)
 
 	// MV index: MVIndex = true should bypass column stats and fall through to index
 	// histogram estimation.
@@ -833,20 +835,35 @@ func TestTryColumnEstimateGuards(t *testing.T) {
 	mvStatsTbl := buildStatsTbl(mvIdxInfo)
 	_, err = cardinality.GetRowCountByIndexRanges(sctx, &mvStatsTbl.HistColl, idxID, pointRanges, nil)
 	require.NoError(t, err)
+	// Guard fired before column path: no cache written.
+	require.Nil(t, mvStatsTbl.HistColl.ColEstimateCache)
 
-	// Unique NOT NULL index with a point probe: tryColumnEstimateForSingleColRanges
-	// should bail out, leaving the index path to apply the unique guarantee (1 row).
-	testKit.MustExec("drop table if exists tuniq")
-	testKit.MustExec("create table tuniq(b int not null, unique key idx_b(b))")
-	testKit.MustExec("insert into tuniq values (1),(2),(3),(4),(5)")
-	testKit.MustExec("analyze table tuniq all columns")
-	tblUniq, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("tuniq"))
-	require.NoError(t, err)
-	statsTblUniq := dom.StatsHandle().GetPhysicalTableStats(tblUniq.Meta().ID, tblUniq.Meta())
-	idxBID := tblUniq.Meta().Indices[0].ID
-	countResult, err := cardinality.GetRowCountByIndexRanges(sctx, &statsTblUniq.HistColl, idxBID, getRange(3, 3), nil)
+	// Unique NOT NULL single-column index with a point probe:
+	// tryColumnEstimateForSingleColRanges should bail out so the index path can
+	// apply the "exactly 1 row" guarantee.
+	//
+	// Real stats tables from GetPhysicalTableStats do not populate Idx2ColUniqueIDs
+	// (that map is only built by GenerateHistCollFromColumnInfo during planning), so
+	// the guard would never be reached via that path. Use a mock HistColl with the
+	// map correctly keyed by column info ID so the guard is actually exercised.
+	uniqIdxInfo := tblInfo.Indices[0].Clone()
+	uniqIdxInfo.Unique = true
+	uniqStatsTbl := buildStatsTbl(uniqIdxInfo)
+	// Override Idx2ColUniqueIDs with the real column info ID (generateMapsForMockStatsTbl
+	// stores idxCol.Offset instead, which would miss the GetCol lookup).
+	uniqStatsTbl.Idx2ColUniqueIDs = map[int64][]int64{idxID: {tblInfo.Columns[0].ID}}
+	countResult, err := cardinality.GetRowCountByIndexRanges(sctx, &uniqStatsTbl.HistColl, idxID, pointRanges, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1.0, countResult.Est)
+	// Guard fired: tryColumnEstimateForSingleColRanges bailed out, so no column cache written.
+	require.Nil(t, uniqStatsTbl.HistColl.ColEstimateCache)
+
+	// Non-point range on the same unique index: guard does not fire, column stats are used.
+	nonPointRanges := getRange(3, 7)
+	_, err = cardinality.GetRowCountByIndexRanges(sctx, &uniqStatsTbl.HistColl, idxID, nonPointRanges, nil)
+	require.NoError(t, err)
+	// Column path was taken: cache now has an entry for the column.
+	require.NotNil(t, uniqStatsTbl.HistColl.ColEstimateCache)
 }
 
 func TestColumnIndexNullEstimation(t *testing.T) {

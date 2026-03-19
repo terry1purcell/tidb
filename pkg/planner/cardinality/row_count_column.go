@@ -127,11 +127,13 @@ func tryColumnEstimateForSingleColRanges(
 	if statistics.ColumnStatsIsInvalid(c, sctx, coll, colID) {
 		return statistics.RowEstimate{}, false
 	}
-	// For a unique non-nullable index where all ranges are non-null point
-	// probes, the index-based path returns exactly 1 per range, which is more
-	// accurate than histogram estimation. Bail out so the caller can use that
-	// path instead.
-	if idx.Info.Unique && mysql.HasNotNullFlag(c.Info.GetFlag()) {
+	// For a single-column unique non-nullable index where all ranges are
+	// non-null point probes, the index-based path returns exactly 1 per range,
+	// which is more accurate than histogram estimation. Bail out so the caller
+	// can use that path instead. Multi-column unique indexes are not eligible
+	// because single-column ranges don't cover the full index, so the "exactly 1"
+	// guarantee does not apply.
+	if len(idx.Info.Columns) == 1 && idx.Info.Unique && mysql.HasNotNullFlag(c.Info.GetFlag()) {
 		tc := sctx.GetSessionVars().StmtCtx.TypeCtx()
 		allPoints := true
 		for _, r := range indexRanges {

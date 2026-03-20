@@ -24,7 +24,8 @@ import (
 func TestSchemaCannotFindColumnRegression(t *testing.T) {
 	testkit.RunTestUnderCascades(t, func(t *testing.T, tk *testkit.TestKit, cascades, caller string) {
 		tk.MustExec("use test")
-		tk.MustExec(`drop table if exists t1, t3, t4`)
+		tk.MustExec(`drop view if exists v_issue65892_topn, v_issue65892_lookup`)
+		tk.MustExec(`drop table if exists t1, t3, t4, t_issue65892_topn, t_issue65892_lookup`)
 		tk.MustExec(`create table t1 (
   id bigint primary key,
   left_v bigint not null
@@ -41,6 +42,25 @@ func TestSchemaCannotFindColumnRegression(t *testing.T) {
 		tk.MustExec("insert into t1 values (10, 93)")
 		tk.MustExec("insert into t3 values (10, 749), (20, 749), (30, 1000)")
 		tk.MustExec("insert into t4 values (10, 749, 1), (20, 749, 0), (30, 1000, 1)")
+		tk.MustExec(`create table t_issue65892_topn (
+  id int primary key,
+  payload int not null,
+  sort_key int not null
+)`)
+		tk.MustExec(`create table t_issue65892_lookup (
+  id int primary key,
+  payload int not null
+)`)
+		tk.MustExec("insert into t_issue65892_topn values (1, 60, 10), (2, 70, 20), (3, 90, 30)")
+		tk.MustExec("insert into t_issue65892_lookup values (1, 55), (2, 65), (4, 88)")
+		tk.MustExec(`create view v_issue65892_topn (c0, c1, c2) as
+select id as c0, payload as c1, 28 - sort_key as c2
+from t_issue65892_topn
+order by 28 - sort_key
+limit 2`)
+		tk.MustExec(`create view v_issue65892_lookup (c0, c1) as
+select id as c0, payload as c1
+from t_issue65892_lookup`)
 
 		var input []string
 		var output []struct {

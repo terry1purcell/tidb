@@ -497,6 +497,13 @@ type StatementContext struct {
 
 	// TableStats stores the visited runtime table stats by table id during query
 	TableStats map[int64]any
+	// ColEstimateCache caches column range estimate results across the full planning
+	// phase of a statement, including all plan candidates. This allows estimates for
+	// the same physical column and predicate range to be reused when the optimizer
+	// explores multiple join orderings or plan variants referencing the same table.
+	// The concrete type is colEstimateCacheMap defined in planner/cardinality; stored
+	// as any here to avoid an import cycle.
+	ColEstimateCache any
 	// useChunkAlloc indicates whether statement use chunk alloc
 	useChunkAlloc bool
 	// Check if TiFlash read engine is removed due to strict sql mode.

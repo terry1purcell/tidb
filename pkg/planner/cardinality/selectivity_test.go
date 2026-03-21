@@ -826,7 +826,7 @@ func TestTryColumnEstimateGuards(t *testing.T) {
 	_, err = cardinality.GetRowCountByIndexRanges(sctx, &partialStatsTbl.HistColl, idxID, pointRanges, nil)
 	require.NoError(t, err)
 	// Guard fired before column path: no cache written.
-	require.Nil(t, partialStatsTbl.HistColl.ColEstimateCache)
+	require.Nil(t, sctx.GetSessionVars().StmtCtx.ColEstimateCache)
 
 	// MV index: MVIndex = true should bypass column stats and fall through to index
 	// histogram estimation.
@@ -836,7 +836,7 @@ func TestTryColumnEstimateGuards(t *testing.T) {
 	_, err = cardinality.GetRowCountByIndexRanges(sctx, &mvStatsTbl.HistColl, idxID, pointRanges, nil)
 	require.NoError(t, err)
 	// Guard fired before column path: no cache written.
-	require.Nil(t, mvStatsTbl.HistColl.ColEstimateCache)
+	require.Nil(t, sctx.GetSessionVars().StmtCtx.ColEstimateCache)
 
 	// Unique NOT NULL single-column index with a point probe:
 	// tryColumnEstimateForSingleColRanges should bail out so the index path can
@@ -856,14 +856,14 @@ func TestTryColumnEstimateGuards(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1.0, countResult.Est)
 	// Guard fired: tryColumnEstimateForSingleColRanges bailed out, so no column cache written.
-	require.Nil(t, uniqStatsTbl.HistColl.ColEstimateCache)
+	require.Nil(t, sctx.GetSessionVars().StmtCtx.ColEstimateCache)
 
 	// Non-point range on the same unique index: guard does not fire, column stats are used.
 	nonPointRanges := getRange(3, 7)
 	_, err = cardinality.GetRowCountByIndexRanges(sctx, &uniqStatsTbl.HistColl, idxID, nonPointRanges, nil)
 	require.NoError(t, err)
 	// Column path was taken: cache now has an entry for the column.
-	require.NotNil(t, uniqStatsTbl.HistColl.ColEstimateCache)
+	require.NotNil(t, sctx.GetSessionVars().StmtCtx.ColEstimateCache)
 }
 
 func TestColumnIndexNullEstimation(t *testing.T) {

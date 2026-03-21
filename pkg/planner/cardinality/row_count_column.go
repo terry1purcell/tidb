@@ -33,15 +33,65 @@ func init() {
 	statistics.GetRowCountByIndexRanges = GetRowCountByIndexRanges
 }
 
+// colEstimateCacheKey identifies a unique (physical table, physical column, pkIsHandle)
+// tuple for the statement-scoped column estimate cache.
+type colEstimateCacheKey struct {
+	physicalID int64
+	colInfoID  int64
+	pkIsHandle bool
+}
+
+// colEstimateCacheEntry holds a single cached estimate for a specific set of ranges.
+type colEstimateCacheEntry struct {
+	ranges        []*ranger.Range
+	realtimeCount int64
+	modifyCount   int64
+	result        statistics.RowEstimate
+}
+
+// colEstimateCacheMap is the concrete type stored in StmtCtx.ColEstimateCache.
+// Keyed by (physicalID, colInfoID, pkIsHandle); each key maps to a list of
+// entries for different range sets on that column.
+type colEstimateCacheMap map[colEstimateCacheKey][]colEstimateCacheEntry
+
+func lookupColEstimate(cache colEstimateCacheMap, key colEstimateCacheKey, ranges []*ranger.Range, realtimeCount, modifyCount int64) (statistics.RowEstimate, bool) {
+	for _, e := range cache[key] {
+		if e.realtimeCount != realtimeCount || e.modifyCount != modifyCount || len(e.ranges) != len(ranges) {
+			continue
+		}
+		match := true
+		for i := range ranges {
+			if !ranges[i].Equal(e.ranges[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return e.result, true
+		}
+	}
+	return statistics.RowEstimate{}, false
+}
+
+func storeColEstimate(cache colEstimateCacheMap, key colEstimateCacheKey, ranges []*ranger.Range, realtimeCount, modifyCount int64, result statistics.RowEstimate) {
+	cloned := make([]*ranger.Range, len(ranges))
+	for i, r := range ranges {
+		cloned[i] = r.Clone()
+	}
+	cache[key] = append(cache[key], colEstimateCacheEntry{
+		ranges:        cloned,
+		realtimeCount: realtimeCount,
+		modifyCount:   modifyCount,
+		result:        result,
+	})
+}
+
 // GetRowCountByColumnRanges estimates the row count by a slice of Range.
 // PKIsHandle indicates whether the column is the single primary key column.
-// Results from valid (non-pseudo) column stats are cached on the HistColl
-// so that subsequent calls with the same column and ranges can skip recomputation.
+// Results from valid (non-pseudo) column stats are cached on the statement context
+// so that subsequent calls with the same column and ranges — including calls from
+// different plan candidates exploring the same physical table — can skip recomputation.
 func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistColl, colUniqueID int64, colRanges []*ranger.Range, pkIsHandle bool) (result statistics.RowEstimate, err error) {
-	// Check cache first.
-	if cached, ok := coll.LookupColEstimate(colUniqueID, colRanges, pkIsHandle); ok {
-		return cached, nil
-	}
 	sc := sctx.GetSessionVars().StmtCtx
 	c := coll.GetCol(colUniqueID)
 	colInfoID := colUniqueID
@@ -70,12 +120,28 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 		}
 		return statistics.DefaultRowEst(pseudoResult), nil
 	}
+
+	// Check the statement-scoped cache before computing.
+	key := colEstimateCacheKey{physicalID: coll.PhysicalID, colInfoID: colInfoID, pkIsHandle: pkIsHandle}
+	var cache colEstimateCacheMap
+	if sc.ColEstimateCache != nil {
+		cache = sc.ColEstimateCache.(colEstimateCacheMap)
+		if cached, ok := lookupColEstimate(cache, key, colRanges, coll.RealtimeCount, coll.ModifyCount); ok {
+			return cached, nil
+		}
+	}
+
 	result, err = getColumnRowCount(sctx, c, colRanges, coll.RealtimeCount, coll.ModifyCount, pkIsHandle)
 	if err != nil {
 		return statistics.DefaultRowEst(0), errors.Trace(err)
 	}
-	// Cache the result from valid column stats.
-	coll.StoreColEstimate(colUniqueID, colRanges, pkIsHandle, result)
+
+	// Store the result in the statement-scoped cache.
+	if cache == nil {
+		cache = make(colEstimateCacheMap)
+		sc.ColEstimateCache = cache
+	}
+	storeColEstimate(cache, key, colRanges, coll.RealtimeCount, coll.ModifyCount, result)
 	return result, nil
 }
 

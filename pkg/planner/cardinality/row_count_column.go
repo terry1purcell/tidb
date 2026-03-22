@@ -123,9 +123,8 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 
 	// Check the statement-scoped cache before computing.
 	key := colEstimateCacheKey{physicalID: coll.PhysicalID, colInfoID: colInfoID, pkIsHandle: pkIsHandle}
-	var cache colEstimateCacheMap
-	if sc.ColEstimateCache != nil {
-		cache = sc.ColEstimateCache.(colEstimateCacheMap)
+	cache, _ := sc.ColEstimateCache.(colEstimateCacheMap)
+	if cache != nil {
 		if cached, ok := lookupColEstimate(cache, key, colRanges, coll.RealtimeCount, coll.ModifyCount); ok {
 			return cached, nil
 		}

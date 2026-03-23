@@ -15,6 +15,8 @@
 package cardinality
 
 import (
+	"strings"
+
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -33,65 +35,42 @@ func init() {
 	statistics.GetRowCountByIndexRanges = GetRowCountByIndexRanges
 }
 
-// colEstimateCacheKey identifies a unique (physical table, physical column, pkIsHandle)
-// tuple for the statement-scoped column estimate cache.
+// colEstimateCacheKey fully identifies a column estimate lookup, including the
+// serialized ranges and row-count snapshot, so it can be used directly as a map
+// key for O(1) lookup without a secondary linear scan or range cloning.
 type colEstimateCacheKey struct {
-	physicalID int64
-	colInfoID  int64
-	pkIsHandle bool
-}
-
-// colEstimateCacheEntry holds a single cached estimate for a specific set of ranges.
-type colEstimateCacheEntry struct {
-	ranges        []*ranger.Range
+	physicalID    int64
+	colInfoID     int64
+	pkIsHandle    bool
 	realtimeCount int64
 	modifyCount   int64
-	result        statistics.RowEstimate
+	rangesKey     string // serialized form of the range slice
 }
 
 // colEstimateCacheMap is the concrete type stored in StmtCtx.ColEstimateCache.
-// Keyed by (physicalID, colInfoID, pkIsHandle); each key maps to a list of
-// entries for different range sets on that column.
-type colEstimateCacheMap map[colEstimateCacheKey][]colEstimateCacheEntry
+// Each distinct (column, ranges, row-count snapshot) tuple maps directly to its
+// cached result, giving O(1) lookup and storage with no per-key linear scan.
+type colEstimateCacheMap map[colEstimateCacheKey]statistics.RowEstimate
 
-func lookupColEstimate(cache colEstimateCacheMap, key colEstimateCacheKey, ranges []*ranger.Range, realtimeCount, modifyCount int64) (statistics.RowEstimate, bool) {
-	for _, e := range cache[key] {
-		if e.realtimeCount != realtimeCount || e.modifyCount != modifyCount || len(e.ranges) != len(ranges) {
-			continue
-		}
-		match := true
-		for i := range ranges {
-			if !ranges[i].Equal(e.ranges[i]) {
-				match = false
-				break
-			}
-		}
-		if match {
-			return e.result, true
-		}
-	}
-	return statistics.RowEstimate{}, false
-}
-
-// storeColEstimate appends a new cache entry for (key, ranges). There is no cap on
-// the number of entries per key because column estimates are reused at planning time,
-// not across statements. The number of distinct range sets for a given column in a
-// single query plan is small in practice (bounded by the predicates referencing that
-// column), and the cache is discarded at the end of each statement's Reset().
-// A per-key cap was considered but removed because expBackoffEstimation can legitimately
-// generate one entry per index it evaluates for the same column, and a low cap (e.g. 64)
-// would evict valid entries on queries with many index alternatives.
-func storeColEstimate(cache colEstimateCacheMap, key colEstimateCacheKey, ranges []*ranger.Range, realtimeCount, modifyCount int64, result statistics.RowEstimate) {
-	cloned := make([]*ranger.Range, len(ranges))
+// buildColEstimateCacheKey constructs the full cache key for a column estimate.
+// Ranges are serialized to a string so the key is comparable without storing or
+// scanning the range slice.
+func buildColEstimateCacheKey(physicalID, colInfoID int64, pkIsHandle bool, ranges []*ranger.Range, realtimeCount, modifyCount int64) colEstimateCacheKey {
+	var b strings.Builder
 	for i, r := range ranges {
-		cloned[i] = r.Clone()
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(r.Redact(errors.RedactLogDisable))
 	}
-	cache[key] = append(cache[key], colEstimateCacheEntry{
-		ranges:        cloned,
+	return colEstimateCacheKey{
+		physicalID:    physicalID,
+		colInfoID:     colInfoID,
+		pkIsHandle:    pkIsHandle,
 		realtimeCount: realtimeCount,
 		modifyCount:   modifyCount,
-		result:        result,
-	})
+		rangesKey:     b.String(),
+	}
 }
 
 // GetRowCountByColumnRanges estimates the row count by a slice of Range.
@@ -130,10 +109,10 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 	}
 
 	// Check the statement-scoped cache before computing.
-	key := colEstimateCacheKey{physicalID: coll.PhysicalID, colInfoID: colInfoID, pkIsHandle: pkIsHandle}
+	key := buildColEstimateCacheKey(coll.PhysicalID, colInfoID, pkIsHandle, colRanges, coll.RealtimeCount, coll.ModifyCount)
 	cache, _ := sc.ColEstimateCache.(colEstimateCacheMap)
 	if cache != nil {
-		if cached, ok := lookupColEstimate(cache, key, colRanges, coll.RealtimeCount, coll.ModifyCount); ok {
+		if cached, ok := cache[key]; ok {
 			return cached, nil
 		}
 	}
@@ -148,7 +127,7 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 		cache = make(colEstimateCacheMap)
 		sc.ColEstimateCache = cache
 	}
-	storeColEstimate(cache, key, colRanges, coll.RealtimeCount, coll.ModifyCount, result)
+	cache[key] = result
 	return result, nil
 }
 

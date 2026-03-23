@@ -978,6 +978,25 @@ func TestIndexHint(t *testing.T) {
 
 			require.Equal(t, output[i].Hints, hint.RestoreOptimizerHints(hints), comment)
 		}
+
+		t.Run("ignore long prefix-sharing index keeps shorter sibling", func(t *testing.T) {
+			tk.MustExec("drop table if exists t_issue66875")
+			tk.MustExec(`create table t_issue66875 (
+				id bigint primary key,
+				contract_sys_no bigint,
+				delete_flag tinyint,
+				key idx_contract_sys_no (contract_sys_no),
+				key idx_contract_sys_no_delete_flag (contract_sys_no, delete_flag)
+			)`)
+
+			rs := tk.MustQuery(`explain format = 'plan_tree'
+select /*+ FORCE_INDEX(t_issue66875, idx_contract_sys_no, idx_contract_sys_no_delete_flag), IGNORE_INDEX(t_issue66875, idx_contract_sys_no_delete_flag) */ *
+from t_issue66875
+where contract_sys_no = 1`)
+			rs.CheckContain("idx_contract_sys_no")
+			rs.CheckNotContain("idx_contract_sys_no_delete_flag")
+			rs.CheckNotContain("TableFullScan")
+		})
 	})
 }
 

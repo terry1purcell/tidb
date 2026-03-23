@@ -35,16 +35,16 @@ func init() {
 	statistics.GetRowCountByIndexRanges = GetRowCountByIndexRanges
 }
 
-// colEstimateCacheKey fully identifies a column estimate lookup, including the
-// serialized ranges and row-count snapshot, so it can be used directly as a map
-// key for O(1) lookup without a secondary linear scan or range cloning.
+// colEstimateCacheKey fully identifies a column estimate lookup so it can be
+// used directly as a map key for O(1) lookup without a secondary linear scan
+// or range cloning. realtimeCount and modifyCount are intentionally omitted:
+// the cache is statement-scoped (cleared on Reset()), so stats for a given
+// physicalID are fixed for the lifetime of the cache.
 type colEstimateCacheKey struct {
-	physicalID    int64
-	colInfoID     int64
-	pkIsHandle    bool
-	realtimeCount int64
-	modifyCount   int64
-	rangesKey     string // serialized form of the range slice
+	physicalID int64
+	colInfoID  int64
+	pkIsHandle bool
+	rangesKey  string // serialized form of the range slice
 }
 
 // colEstimateCacheMap is the concrete type stored in StmtCtx.ColEstimateCache.
@@ -52,10 +52,12 @@ type colEstimateCacheKey struct {
 // cached result, giving O(1) lookup and storage with no per-key linear scan.
 type colEstimateCacheMap map[colEstimateCacheKey]statistics.RowEstimate
 
-// buildColEstimateCacheKey constructs the full cache key for a column estimate.
+// buildColEstimateCacheKey constructs the cache key for a column estimate.
 // Ranges are serialized to a string so the key is comparable without storing or
-// scanning the range slice.
-func buildColEstimateCacheKey(physicalID, colInfoID int64, pkIsHandle bool, ranges []*ranger.Range, realtimeCount, modifyCount int64) colEstimateCacheKey {
+// scanning the range slice. The Collators field of each Range is intentionally
+// omitted: getColumnRowCount uses the collation embedded in each Datum value,
+// not the Range.Collators slice, so it does not affect the estimate result.
+func buildColEstimateCacheKey(physicalID, colInfoID int64, pkIsHandle bool, ranges []*ranger.Range) colEstimateCacheKey {
 	var b strings.Builder
 	for i, r := range ranges {
 		if i > 0 {
@@ -64,12 +66,10 @@ func buildColEstimateCacheKey(physicalID, colInfoID int64, pkIsHandle bool, rang
 		b.WriteString(r.Redact(errors.RedactLogDisable))
 	}
 	return colEstimateCacheKey{
-		physicalID:    physicalID,
-		colInfoID:     colInfoID,
-		pkIsHandle:    pkIsHandle,
-		realtimeCount: realtimeCount,
-		modifyCount:   modifyCount,
-		rangesKey:     b.String(),
+		physicalID: physicalID,
+		colInfoID:  colInfoID,
+		pkIsHandle: pkIsHandle,
+		rangesKey:  b.String(),
 	}
 }
 
@@ -109,7 +109,7 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 	}
 
 	// Check the statement-scoped cache before computing.
-	key := buildColEstimateCacheKey(coll.PhysicalID, colInfoID, pkIsHandle, colRanges, coll.RealtimeCount, coll.ModifyCount)
+	key := buildColEstimateCacheKey(coll.PhysicalID, colInfoID, pkIsHandle, colRanges)
 	cache, _ := sc.ColEstimateCache.(colEstimateCacheMap)
 	if cache != nil {
 		if cached, ok := cache[key]; ok {

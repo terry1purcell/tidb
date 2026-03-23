@@ -35,21 +35,31 @@ func init() {
 	statistics.GetRowCountByIndexRanges = GetRowCountByIndexRanges
 }
 
-// colEstimateCacheKey fully identifies a column estimate lookup so it can be
-// used directly as a map key for O(1) lookup without a secondary linear scan
-// or range cloning. realtimeCount and modifyCount are intentionally omitted:
-// the cache is statement-scoped (cleared on Reset()), so stats for a given
-// physicalID are fixed for the lifetime of the cache.
+// colEstimateCacheKey identifies a column estimate lookup. realtimeCount and
+// modifyCount are included because they affect the estimate through out-of-range
+// and uniform-distribution fallback logic (IsLastBucketEndValueUnderrepresented,
+// estimateRowCountWithUniformDistribution, OutOfRangeRowCount), and through
+// GetIncreaseFactor which is applied per range inside getColumnRowCount.
+//
+// TODO: remove realtimeCount and modifyCount from the key. This requires
+// refactoring OutOfRangeRowCount (and related helpers) to return a selectivity
+// ratio in stats-count space rather than an absolute row count already scaled to
+// realtimeCount. Once those functions no longer take realtimeCount/modifyCount as
+// inputs, GetIncreaseFactor can be applied once at the GetRowCountByColumnRanges
+// call site, and the cache key can be reduced to (physicalID, colInfoID, pkIsHandle,
+// rangesKey).
 type colEstimateCacheKey struct {
-	physicalID int64
-	colInfoID  int64
-	pkIsHandle bool
-	rangesKey  string // serialized form of the range slice
+	physicalID    int64
+	colInfoID     int64
+	pkIsHandle    bool
+	realtimeCount int64
+	modifyCount   int64
+	rangesKey     string // serialized form of the range slice
 }
 
 // colEstimateCacheMap is the concrete type stored in StmtCtx.ColEstimateCache.
-// Each distinct (column, ranges, row-count snapshot) tuple maps directly to its
-// cached result, giving O(1) lookup and storage with no per-key linear scan.
+// Each distinct (column, ranges) tuple maps directly to its cached stats-based
+// result, giving O(1) lookup and storage with no per-key linear scan.
 type colEstimateCacheMap map[colEstimateCacheKey]statistics.RowEstimate
 
 // buildColEstimateCacheKey constructs the cache key for a column estimate.
@@ -57,7 +67,7 @@ type colEstimateCacheMap map[colEstimateCacheKey]statistics.RowEstimate
 // scanning the range slice. The Collators field of each Range is intentionally
 // omitted: getColumnRowCount uses the collation embedded in each Datum value,
 // not the Range.Collators slice, so it does not affect the estimate result.
-func buildColEstimateCacheKey(physicalID, colInfoID int64, pkIsHandle bool, ranges []*ranger.Range) colEstimateCacheKey {
+func buildColEstimateCacheKey(physicalID, colInfoID int64, pkIsHandle bool, ranges []*ranger.Range, realtimeCount, modifyCount int64) colEstimateCacheKey {
 	var b strings.Builder
 	for i, r := range ranges {
 		if i > 0 {
@@ -66,10 +76,12 @@ func buildColEstimateCacheKey(physicalID, colInfoID int64, pkIsHandle bool, rang
 		b.WriteString(r.Redact(errors.RedactLogDisable))
 	}
 	return colEstimateCacheKey{
-		physicalID: physicalID,
-		colInfoID:  colInfoID,
-		pkIsHandle: pkIsHandle,
-		rangesKey:  b.String(),
+		physicalID:    physicalID,
+		colInfoID:     colInfoID,
+		pkIsHandle:    pkIsHandle,
+		realtimeCount: realtimeCount,
+		modifyCount:   modifyCount,
+		rangesKey:     b.String(),
 	}
 }
 
@@ -109,7 +121,7 @@ func GetRowCountByColumnRanges(sctx planctx.PlanContext, coll *statistics.HistCo
 	}
 
 	// Check the statement-scoped cache before computing.
-	key := buildColEstimateCacheKey(coll.PhysicalID, colInfoID, pkIsHandle, colRanges)
+	key := buildColEstimateCacheKey(coll.PhysicalID, colInfoID, pkIsHandle, colRanges, coll.RealtimeCount, coll.ModifyCount)
 	cache, _ := sc.ColEstimateCache.(colEstimateCacheMap)
 	if cache != nil {
 		if cached, ok := cache[key]; ok {
@@ -206,7 +218,9 @@ func tryColumnEstimateForSingleColRanges(
 	return result, true
 }
 
-// equalRowCountOnColumn estimates the row count by a slice of Range and a Datum.
+// equalRowCountOnColumn estimates the row count for a single value.
+// The returned value is in stats-count space; callers are responsible for applying
+// GetIncreaseFactor when accumulating into a per-range total.
 func equalRowCountOnColumn(sctx planctx.PlanContext, c *statistics.Column, val types.Datum, encodedVal []byte, realtimeRowCount, modifyCount int64) (result statistics.RowEstimate, err error) {
 	if val.IsNull() {
 		return statistics.DefaultRowEst(float64(c.NullCount)), nil
@@ -256,6 +270,9 @@ func equalRowCountOnColumn(sctx planctx.PlanContext, c *statistics.Column, val t
 }
 
 // getColumnRowCount estimates the row count by a slice of Range.
+// GetIncreaseFactor is applied per range, before the out-of-range contribution,
+// so that histogram-based estimates are scaled to the current table size while
+// OutOfRangeRowCount (which already operates in current-count space) is not double-scaled.
 func getColumnRowCount(sctx planctx.PlanContext, c *statistics.Column, ranges []*ranger.Range, realtimeRowCount, modifyCount int64, pkIsHandle bool) (statistics.RowEstimate, error) {
 	sc := sctx.GetSessionVars().StmtCtx
 	var totalCount statistics.RowEstimate
@@ -295,7 +312,7 @@ func getColumnRowCount(sctx planctx.PlanContext, c *statistics.Column, ranges []
 				if err != nil {
 					return statistics.DefaultRowEst(0), errors.Trace(err)
 				}
-				// If the current table row count has changed, we should scale the row count accordingly.
+				// If the current table row count has changed, scale the estimate accordingly.
 				cnt.MultiplyAll(c.GetIncreaseFactor(realtimeRowCount))
 				totalCount.Add(cnt)
 			}
@@ -313,7 +330,7 @@ func getColumnRowCount(sctx planctx.PlanContext, c *statistics.Column, ranges []
 					if err != nil {
 						return statistics.DefaultRowEst(0), err
 					}
-					// If the current table row count has changed, we should scale the row count accordingly.
+					// If the current table row count has changed, scale the estimate accordingly.
 					cnt.MultiplyAll(c.GetIncreaseFactor(realtimeRowCount))
 					totalCount.Add(cnt)
 				}
@@ -347,10 +364,11 @@ func getColumnRowCount(sctx planctx.PlanContext, c *statistics.Column, ranges []
 			}
 			cnt.Add(highCnt)
 		}
-		// Clamp all 3 fields of RowEstimate to [0, realtimeRowCount]
 		cnt.Clamp(0, float64(realtimeRowCount))
 
-		// If the current table row count has changed, we should scale the row count accordingly.
+		// If the current table row count has changed, scale the estimate accordingly.
+		// This must happen before the out-of-range contribution because OutOfRangeRowCount
+		// already returns values in current-count space.
 		increaseFactor := c.GetIncreaseFactor(realtimeRowCount)
 		cnt.MultiplyAll(increaseFactor)
 

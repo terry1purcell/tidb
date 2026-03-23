@@ -73,6 +73,14 @@ func lookupColEstimate(cache colEstimateCacheMap, key colEstimateCacheKey, range
 	return statistics.RowEstimate{}, false
 }
 
+// storeColEstimate appends a new cache entry for (key, ranges). There is no cap on
+// the number of entries per key because column estimates are reused at planning time,
+// not across statements. The number of distinct range sets for a given column in a
+// single query plan is small in practice (bounded by the predicates referencing that
+// column), and the cache is discarded at the end of each statement's Reset().
+// A per-key cap was considered but removed because expBackoffEstimation can legitimately
+// generate one entry per index it evaluates for the same column, and a low cap (e.g. 64)
+// would evict valid entries on queries with many index alternatives.
 func storeColEstimate(cache colEstimateCacheMap, key colEstimateCacheKey, ranges []*ranger.Range, realtimeCount, modifyCount int64, result statistics.RowEstimate) {
 	cloned := make([]*ranger.Range, len(ranges))
 	for i, r := range ranges {

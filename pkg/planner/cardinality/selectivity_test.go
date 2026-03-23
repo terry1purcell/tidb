@@ -866,6 +866,78 @@ func TestTryColumnEstimateGuards(t *testing.T) {
 	require.NotNil(t, sctx.GetSessionVars().StmtCtx.ColEstimateCache)
 }
 
+// TestColEstimateCacheSharingAcrossDataSources verifies that ColEstimateCache is keyed
+// by (physicalID, colInfoID) — the physical column identity — not by the per-query
+// colUniqueID assigned by the planner. Two DataSource nodes that reference the same
+// physical table column (as occurs during join reordering) must share a cached estimate
+// rather than recompute independently.
+//
+// The test builds two HistColl instances that share a physicalID and colInfoID
+// (via UniqueID2colInfoID) but have different colUniqueIDs and different underlying
+// histograms. A first call populates the cache via HistColl1. A second call via HistColl2
+// must return the cached result from HistColl1, not the result that HistColl2's different
+// histogram would produce if computed fresh.
+func TestColEstimateCacheSharingAcrossDataSources(t *testing.T) {
+	const (
+		physicalID   = int64(100) // physical table ID shared by both DataSource nodes
+		colInfoID    = int64(42)  // physical column metadata ID
+		colUniqueID1 = int64(1000)
+		colUniqueID2 = int64(2000)
+		rowCount     = int64(10)
+	)
+
+	colInfo := &model.ColumnInfo{ID: colInfoID}
+	colInfo.FieldType = *types.NewFieldType(mysql.TypeLonglong)
+
+	// HistColl1: histogram with values 0..9. For getRange(3, 7), the estimate is ~5 rows.
+	values1, err := generateIntDatum(1, 10)
+	require.NoError(t, err)
+	coll1 := statistics.NewHistColl(physicalID, rowCount, 0, 1, 0)
+	coll1.UniqueID2colInfoID[colUniqueID1] = colInfoID
+	coll1.SetCol(colUniqueID1, &statistics.Column{
+		Histogram:         *mockStatsHistogram(colInfoID, values1, 1, types.NewFieldType(mysql.TypeLonglong)),
+		Info:              colInfo,
+		StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+		StatsVer:          2,
+	})
+
+	// HistColl2: histogram with values 100..109 (all above the query range [3, 7]).
+	// Fresh computation on this histogram would return a near-zero out-of-range
+	// estimate — demonstrably different from HistColl1's result.
+	values2 := make([]types.Datum, 10)
+	for i := range 10 {
+		values2[i] = types.NewIntDatum(int64(100 + i))
+	}
+	coll2 := statistics.NewHistColl(physicalID, rowCount, 0, 1, 0)
+	coll2.UniqueID2colInfoID[colUniqueID2] = colInfoID
+	coll2.SetCol(colUniqueID2, &statistics.Column{
+		Histogram:         *mockStatsHistogram(colInfoID, values2, 1, types.NewFieldType(mysql.TypeLonglong)),
+		Info:              colInfo,
+		StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+		StatsVer:          2,
+	})
+
+	sctx := mock.NewContext()
+	ranges := getRange(3, 7)
+
+	// First call: DataSource 1. Cache is empty; result computed from HistColl1 (values 0-9).
+	require.Nil(t, sctx.GetSessionVars().StmtCtx.ColEstimateCache)
+	result1, err := cardinality.GetRowCountByColumnRanges(sctx, coll1, colUniqueID1, ranges, false)
+	require.NoError(t, err)
+	require.NotNil(t, sctx.GetSessionVars().StmtCtx.ColEstimateCache)
+	require.Positive(t, result1.Est, "HistColl1 histogram covers [3,7]; estimate should be > 0")
+
+	// Second call: DataSource 2. Same physicalID and colInfoID, different colUniqueID.
+	// The cache must be hit (returning result1). If sharing is broken and the call
+	// computes fresh from HistColl2 (values 100-109, entirely above [3,7]), the
+	// result would be near-zero — not equal to result1.
+	result2, err := cardinality.GetRowCountByColumnRanges(sctx, coll2, colUniqueID2, ranges, false)
+	require.NoError(t, err)
+	require.Equal(t, result1, result2,
+		"DataSource 2 (different colUniqueID, same physicalID+colInfoID) should return "+
+			"the cached result from DataSource 1, not recompute from its different histogram")
+}
+
 func TestColumnIndexNullEstimation(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)

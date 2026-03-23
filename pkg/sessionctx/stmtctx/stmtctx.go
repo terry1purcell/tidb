@@ -503,6 +503,14 @@ type StatementContext struct {
 	// explores multiple join orderings or plan variants referencing the same table.
 	// The concrete type is colEstimateCacheMap defined in planner/cardinality; stored
 	// as any here to avoid an import cycle.
+	//
+	// Intentionally excluded from LogicalPlanBuildState save/restore: entries from a
+	// discarded plan candidate should persist so that the next candidate can reuse
+	// them. Column histogram results are pure read-only functions of (stats, ranges),
+	// so retaining entries across candidate boundaries is safe and beneficial.
+	//
+	// Reset to nil by Reset() (not in the preserved-fields list) so each new SQL
+	// statement starts with a clean cache.
 	ColEstimateCache any
 	// useChunkAlloc indicates whether statement use chunk alloc
 	useChunkAlloc bool

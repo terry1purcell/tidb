@@ -62,7 +62,9 @@ func TestExpBackoffEstimation(t *testing.T) {
 		tk.MustQuery(input[i]).Check(testkit.Rows(output[i]...))
 	}
 
-	// The last case is that no column is loaded and we get no stats at all.
+	// The last case disables expBackoff column-level estimates via failpoint; the
+	// planner falls back to the index histogram (betweenRowCountOnIndex), which
+	// interpolates the multi-column range and still produces a non-trivial estimate.
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/planner/cardinality/cleanEstResults", `return(true)`))
 	testdata.OnRecord(func() {
 		output[inputLen-1] = testdata.ConvertRowsToStrings(tk.MustQuery(input[inputLen-1]).Rows())

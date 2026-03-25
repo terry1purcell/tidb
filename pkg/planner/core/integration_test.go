@@ -2301,4 +2301,14 @@ func TestIssue66619(t *testing.T) {
 
 	tk.MustQuery("select a, (select count(1) from t2 where t2.a = t1.a) from t1 order by a").
 		Check(testkit.Rows("1 1", "2 1", "3 0", "4 0"))
+
+	tk.MustExec("drop table if exists t0")
+	tk.MustExec("create table t0(c0 text(383) not null)")
+	tk.MustExec("insert into t0 values ('')")
+	tk.MustExec("replace into t0 values (' ')")
+
+	tk.MustQuery("select /* issue:66947 direct-having */ hex(t0.c0) from t0 group by t0.c0 having sum(t0.c0) > -1 and char_length(t0.c0)").
+		Check(testkit.Rows("20"))
+	tk.MustQuery("select /* issue:66947 derived-filter */ hex(ref0) from (select t0.c0 as ref0, (sum(t0.c0) > -1 and char_length(t0.c0)) as ref1 from t0 group by t0.c0) as s where ref1").
+		Check(testkit.Rows("20"))
 }

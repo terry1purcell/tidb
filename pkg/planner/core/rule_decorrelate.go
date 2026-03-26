@@ -133,13 +133,24 @@ func (*DecorrelateSolver) aggDefaultValueMap(agg *logicalop.LogicalAggregation) 
 	return defaultValueMap
 }
 
+
+
 // Optimize implements base.LogicalOptRule.<0th> interface.
 func (s *DecorrelateSolver) Optimize(ctx context.Context, p base.LogicalPlan, opt *optimizetrace.LogicalOptimizeOp) (base.LogicalPlan, bool, error) {
 	planChanged := false
 	if apply, ok := p.(*logicalop.LogicalApply); ok {
 		outerPlan := apply.Children()[0]
 		innerPlan := apply.Children()[1]
-		apply.CorCols = coreusage.ExtractCorColumnsBySchema4LogicalPlan(apply.Children()[1], apply.Children()[0].Schema())
+		// Use FullSchema when outer plan is a USING/NATURAL join, so we capture
+		// correlated columns that reference the redundant (merged) join columns.
+		// Walk through wrapper operators (e.g., LogicalSelection from ON clauses)
+		// to find the underlying LogicalJoin, matching the schema used for name
+		// resolution in LATERAL subqueries (see logical_plan_builder.go buildJoin).
+		outerSchema := outerPlan.Schema()
+		if fullSchema, _ := findJoinFullSchema(outerPlan); fullSchema != nil {
+			outerSchema = fullSchema
+		}
+		apply.CorCols = coreusage.ExtractCorColumnsBySchema4LogicalPlan(innerPlan, outerSchema)
 		if len(apply.CorCols) == 0 {
 			// If the inner plan is non-correlated, the apply will be simplified to join.
 			join := &apply.LogicalJoin

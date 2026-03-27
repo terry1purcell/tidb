@@ -175,10 +175,10 @@ func planCachePreprocess(ctx context.Context, sctx sessionctx.Context, isNonPrep
 	for _, tbl := range stmt.tbls {
 		tblInfo := tbl.Meta()
 		if tableHasDirtyContent(sctx.GetPlanCtx(), tblInfo) {
-			if sctx.GetSessionVars().StmtCtx.TblInfo2UnionScan == nil {
-				sctx.GetSessionVars().StmtCtx.TblInfo2UnionScan = make(map[*model.TableInfo]bool)
+			if vars.StmtCtx.TblInfo2UnionScan == nil {
+				vars.StmtCtx.TblInfo2UnionScan = make(map[*model.TableInfo]bool)
 			}
-			sctx.GetSessionVars().StmtCtx.TblInfo2UnionScan[tblInfo] = true
+			vars.StmtCtx.TblInfo2UnionScan[tblInfo] = true
 		}
 	}
 

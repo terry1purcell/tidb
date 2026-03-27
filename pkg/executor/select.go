@@ -954,26 +954,14 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	} else {
 		clear(sc.CTEStorageMap.(map[int]*CTEStorages))
 	}
-	if sc.LockTableIDs == nil {
-		sc.LockTableIDs = make(map[int64]struct{})
-	} else {
-		clear(sc.LockTableIDs)
-	}
-	if sc.TableStats == nil {
-		sc.TableStats = make(map[int64]any)
-	} else {
-		clear(sc.TableStats)
-	}
-	if sc.RelatedTableIDs == nil {
-		sc.RelatedTableIDs = make(map[int64]struct{})
-	} else {
-		clear(sc.RelatedTableIDs)
-	}
-	if sc.TblInfo2UnionScan == nil {
-		sc.TblInfo2UnionScan = make(map[*model.TableInfo]bool)
-	} else {
-		clear(sc.TblInfo2UnionScan)
-	}
+	// These maps are lazily initialized at their write sites to avoid
+	// allocation overhead for simple queries (e.g. point-gets) that never
+	// use them.  All read sites already handle nil maps safely (len(nil)==0,
+	// range over nil is a no-op in Go).
+	sc.LockTableIDs = nil
+	sc.TableStats = nil
+	sc.RelatedTableIDs = nil
+	sc.TblInfo2UnionScan = nil
 	sc.IsStaleness = false
 	sc.IsSyncStatsFailed = false
 	sc.IsExplainAnalyzeDML = false

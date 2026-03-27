@@ -233,8 +233,14 @@ func isTrivialTable(tblInfo *model.TableInfo) bool {
 			return false
 		}
 	}
+	if len(tblInfo.ForeignKeys) > 0 {
+		return false
+	}
 	for _, col := range tblInfo.Columns {
 		if col.IsGenerated() && !col.GeneratedStored {
+			return false
+		}
+		if col.Hidden {
 			return false
 		}
 	}

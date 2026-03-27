@@ -1,0 +1,104 @@
+// Copyright 2026 PingCAP, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package pointget
+
+import (
+	"testing"
+
+	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/stretchr/testify/require"
+)
+
+func TestTrivialPlan(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	// Table with no secondary indexes — eligible for trivial plan.
+	tk.MustExec("drop table if exists t_simple")
+	tk.MustExec("create table t_simple(a int primary key, b int, c varchar(32))")
+	tk.MustExec("insert into t_simple values(1, 10, 'hello'), (2, 20, 'world'), (3, 30, 'foo')")
+
+	// Basic full table scan: SELECT *
+	rows := tk.MustQuery("select * from t_simple").Sort().Rows()
+	require.Len(t, rows, 3)
+	require.Equal(t, "1", rows[0][0])
+	require.Equal(t, "hello", rows[0][2])
+
+	// SELECT with specific columns.
+	rows = tk.MustQuery("select a, c from t_simple").Sort().Rows()
+	require.Len(t, rows, 3)
+	require.Equal(t, "foo", rows[2][1])
+
+	// SELECT with column alias.
+	rows = tk.MustQuery("select a as id, b as val from t_simple").Sort().Rows()
+	require.Len(t, rows, 3)
+
+	// Verify EXPLAIN shows a table scan plan.
+	tk.MustQuery("explain format = 'brief' select * from t_simple").Check(testkit.Rows(
+		"TableReader 10000.00 root  data:TableFullScan",
+		"└─TableFullScan 10000.00 cop[tikv] table:t_simple keep order:false, stats:pseudo",
+	))
+}
+
+func TestTrivialPlanFallback(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t_idx, t_part, t_gen")
+
+	// Table with a secondary index — should NOT use trivial plan (optimizer
+	// needs to decide between table scan and index scan).
+	tk.MustExec("create table t_idx(a int primary key, b int, index idx_b(b))")
+	tk.MustExec("insert into t_idx values(1, 10), (2, 20)")
+	rows := tk.MustQuery("select * from t_idx").Sort().Rows()
+	require.Len(t, rows, 2)
+
+	// Partitioned table — should NOT use trivial plan.
+	tk.MustExec("create table t_part(a int primary key, b int) partition by hash(a) partitions 4")
+	tk.MustExec("insert into t_part values(1, 10), (2, 20)")
+	rows = tk.MustQuery("select * from t_part").Sort().Rows()
+	require.Len(t, rows, 2)
+
+	// Table with virtual generated column — should NOT use trivial plan.
+	tk.MustExec("create table t_gen(a int primary key, b int, c int as (a + b))")
+	tk.MustExec("insert into t_gen(a, b) values(1, 10), (2, 20)")
+	rows = tk.MustQuery("select * from t_gen").Sort().Rows()
+	require.Len(t, rows, 2)
+
+	// Query with WHERE clause on a trivial table — should NOT use trivial plan.
+	tk.MustExec("drop table if exists t_no_idx")
+	tk.MustExec("create table t_no_idx(a int primary key, b int)")
+	tk.MustExec("insert into t_no_idx values(1, 10), (2, 20)")
+	rows = tk.MustQuery("select * from t_no_idx where b > 5").Rows()
+	require.Len(t, rows, 2)
+
+	// Query with ORDER BY — should NOT use trivial plan.
+	rows = tk.MustQuery("select * from t_no_idx order by b").Rows()
+	require.Len(t, rows, 2)
+
+	// Query with LIMIT — should NOT use trivial plan.
+	rows = tk.MustQuery("select * from t_no_idx limit 1").Rows()
+	require.Len(t, rows, 1)
+
+	// Query with DISTINCT — should NOT use trivial plan.
+	rows = tk.MustQuery("select distinct b from t_no_idx").Rows()
+	require.Len(t, rows, 2)
+
+	// Query with expression in SELECT — should NOT use trivial plan
+	// (buildSchemaFromFields returns nil for non-column expressions).
+	rows = tk.MustQuery("select a + 1 from t_no_idx").Rows()
+	require.Len(t, rows, 2)
+}

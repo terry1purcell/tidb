@@ -257,6 +257,13 @@ func optimizeNoCache(ctx context.Context, sctx sessionctx.Context, node *resolve
 		if fp != nil {
 			return fp, fp.OutputNames(), nil
 		}
+
+		// Try the trivial plan fast path for simple full-table scans where the
+		// plan is predetermined (no secondary indexes, no TiFlash, no predicates).
+		// This skips logical optimization, stats loading, and cost estimation.
+		if tp, tpNames := core.TryTrivialPlan(pctx, node); tp != nil {
+			return tp, tpNames, nil
+		}
 	}
 
 	enableUseBinding := sessVars.UsePlanBaselines

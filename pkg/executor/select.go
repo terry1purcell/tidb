@@ -956,12 +956,13 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	}
 	// These maps are lazily initialized at their write sites to avoid
 	// allocation overhead for simple queries (e.g. point-gets) that never
-	// use them.  All read sites already handle nil maps safely (len(nil)==0,
-	// range over nil is a no-op in Go).
-	sc.LockTableIDs = nil
-	sc.TableStats = nil
-	sc.RelatedTableIDs = nil
-	sc.TblInfo2UnionScan = nil
+	// use them.  If already allocated (reused StatementContext), clear to
+	// preserve the backing array for the next complex query.  All read
+	// sites handle nil maps safely (len(nil)==0, range over nil is a no-op).
+	clear(sc.LockTableIDs)
+	clear(sc.TableStats)
+	clear(sc.RelatedTableIDs)
+	clear(sc.TblInfo2UnionScan)
 	sc.IsStaleness = false
 	sc.IsSyncStatsFailed = false
 	sc.IsExplainAnalyzeDML = false

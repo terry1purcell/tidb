@@ -96,6 +96,11 @@ func TryTrivialPlan(ctx base.PlanContext, node *resolve.NodeW) (base.Plan, types
 		return nil, nil
 	}
 
+	// Views and sequences need the full optimizer to expand their definitions.
+	if tblInfo.IsView() || tblInfo.IsSequence() {
+		return nil, nil
+	}
+
 	if !isTrivialTable(tblInfo) {
 		return nil, nil
 	}

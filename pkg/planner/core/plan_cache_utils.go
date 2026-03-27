@@ -381,7 +381,7 @@ func NewPlanCacheKey(sctx sessionctx.Context, stmt *PlanCacheStmt) (key, binding
 		// '|' + each limit count/offset takes 8 bytes + '|'
 		hashLen += 2 + len(stmt.limits)*2*8
 	}
-	if vars.GetSessionVars().PlanCacheInvalidationOnFreshStats && (binding == "" || !vars.GetSessionVars().PlanCacheSkipStatsOnBinding) {
+	if vars.PlanCacheInvalidationOnFreshStats && (binding == "" || !vars.PlanCacheSkipStatsOnBinding) {
 		// statsVerHash: skipped when a binding is matched and PlanCacheSkipStatsOnBinding is on,
 		// because a binding pins the plan via hints so stats changes cannot alter the chosen plan.
 		hashLen += 8
@@ -458,7 +458,7 @@ func NewPlanCacheKey(sctx sessionctx.Context, stmt *PlanCacheStmt) (key, binding
 
 	// stats ver can affect cached plan, unless a binding is active and PlanCacheSkipStatsOnBinding
 	// is enabled — a binding pins the plan via hints, so stats changes cannot alter the chosen plan.
-	if sctx.GetSessionVars().PlanCacheInvalidationOnFreshStats && (binding == "" || !sctx.GetSessionVars().PlanCacheSkipStatsOnBinding) {
+	if vars.PlanCacheInvalidationOnFreshStats && (binding == "" || !vars.PlanCacheSkipStatsOnBinding) {
 		var statsVerHash uint64
 		for _, t := range stmt.tables {
 			statsVerHash += getLatestVersionFromStatsTable(sctx, t.Meta(), t.Meta().ID) // use '+' as the hash function for simplicity

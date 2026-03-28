@@ -2569,7 +2569,6 @@ func findFieldNameFromNaturalUsingJoin(p base.LogicalPlan, v *ast.ColumnName) (c
 	return nil, nil, nil
 }
 
-
 func (er *expressionRewriter) evalDefaultExprForTable(v *ast.DefaultExpr, tbl *model.TableInfo) {
 	idx, err := expression.FindFieldName(er.names, v.Name)
 	if err != nil {

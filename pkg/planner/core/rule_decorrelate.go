@@ -139,14 +139,17 @@ func (s *DecorrelateSolver) Optimize(ctx context.Context, p base.LogicalPlan, op
 	if apply, ok := p.(*logicalop.LogicalApply); ok {
 		outerPlan := apply.Children()[0]
 		innerPlan := apply.Children()[1]
-		// Use FullSchema when outer plan is a USING/NATURAL join, so we capture
-		// correlated columns that reference the redundant (merged) join columns.
-		// Walk through wrapper operators (e.g., LogicalSelection from ON clauses)
-		// to find the underlying LogicalJoin, matching the schema used for name
-		// resolution in LATERAL subqueries (see logical_plan_builder.go buildJoin).
+		// For LATERAL joins, use FullSchema when the outer plan is a USING/NATURAL
+		// join, so we capture correlated columns that reference the redundant
+		// (merged) join columns. Walk through wrapper operators (e.g.,
+		// LogicalSelection from ON clauses) to find the underlying LogicalJoin,
+		// matching the schema used for name resolution in LATERAL subqueries
+		// (see logical_plan_builder.go buildJoin).
 		outerSchema := outerPlan.Schema()
-		if fullSchema, _ := findJoinFullSchema(outerPlan); fullSchema != nil {
-			outerSchema = fullSchema
+		if apply.IsLateral {
+			if fullSchema, _ := findJoinFullSchema(outerPlan); fullSchema != nil {
+				outerSchema = fullSchema
+			}
 		}
 		apply.CorCols = coreusage.ExtractCorColumnsBySchema4LogicalPlan(innerPlan, outerSchema)
 		if len(apply.CorCols) == 0 {
@@ -163,7 +166,7 @@ func (s *DecorrelateSolver) Optimize(ctx context.Context, p base.LogicalPlan, op
 			// Notice that no matter what kind of join is, it's always right.
 			newConds := make([]expression.Expression, 0, len(sel.Conditions))
 			for _, cond := range sel.Conditions {
-				newConds = append(newConds, cond.Decorrelate(outerPlan.Schema()))
+				newConds = append(newConds, cond.Decorrelate(outerSchema))
 			}
 			apply.AttachOnConds(newConds)
 			innerPlan = sel.Children()[0]
@@ -203,9 +206,9 @@ func (s *DecorrelateSolver) Optimize(ctx context.Context, p base.LogicalPlan, op
 			}
 			// step2: when it can be substituted all, we then just do the de-correlation (apply conditions included).
 			for i, expr := range proj.Exprs {
-				proj.Exprs[i] = expr.Decorrelate(outerPlan.Schema())
+				proj.Exprs[i] = expr.Decorrelate(outerSchema)
 			}
-			apply.Decorrelate(outerPlan.Schema())
+			apply.Decorrelate(outerSchema)
 
 			innerPlan = proj.Children()[0]
 			apply.SetChildren(outerPlan, innerPlan)

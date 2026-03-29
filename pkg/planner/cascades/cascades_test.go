@@ -77,4 +77,12 @@ func TestXFormedOperatorShouldDeriveTheirStatsOwn(t *testing.T) {
 	tk.Session().GetSessionVars().SetEnableCascadesPlanner(true)
 	res2 = tk.MustQuery("explain format=\"brief\" SELECT /*+ hash_join(tab, t2@sel_2) */ 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
 	require.Equal(t, res1, res2)
+
+	// LATERAL derived table: both planners must produce a valid plan.
+	// The cascades planner may choose a different physical operator (e.g.
+	// HashJoin vs IndexHashJoin) so we only assert both succeed, not equality.
+	tk.Session().GetSessionVars().SetEnableCascadesPlanner(false)
+	tk.MustQuery("explain format=\"brief\" SELECT 1 FROM t1 AS tab, LATERAL (SELECT 1 FROM t2 WHERE a2 = tab.a1) AS sel")
+	tk.Session().GetSessionVars().SetEnableCascadesPlanner(true)
+	tk.MustQuery("explain format=\"brief\" SELECT 1 FROM t1 AS tab, LATERAL (SELECT 1 FROM t2 WHERE a2 = tab.a1) AS sel")
 }

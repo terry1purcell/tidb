@@ -4283,7 +4283,7 @@ func (b *PlanBuilder) buildSelect(ctx context.Context, sel *ast.SelectStmt) (p b
 
 		// Check for ORDER BY and LIMIT - allow them only within LATERAL subqueries
 		if (sel.OrderBy != nil || sel.Limit != nil) && !b.buildingLateralSubquery {
-			return nil, plannererrors.ErrNotSupportedYet.GenWithStackByArgs("ORDER BY / LIMIT in recursive query block of Common Table Expression (except within LATERAL subqueries)")
+			return nil, plannererrors.ErrNotSupportedYet.GenWithStackByArgs("ORDER BY / LIMIT / SELECT DISTINCT in recursive query block of Common Table Expression")
 		}
 
 		if sel.GroupBy != nil {

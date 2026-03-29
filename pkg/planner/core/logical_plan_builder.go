@@ -987,7 +987,6 @@ func (b *PlanBuilder) buildLateralJoin(ctx context.Context, leftPlan, rightPlan 
 
 	ap.SetChildren(leftPlan, rightPlan)
 	ap.SetSchema(expression.MergeSchema(leftPlan.Schema(), rightPlan.Schema()))
-	setIsInApplyForCTE(rightPlan, ap.Schema())
 
 	// Note: nullability adjustment is not needed for InnerJoin (the only type supported currently).
 	// When LEFT/RIGHT JOIN support is added, ResetNotNullFlag must be called here.
@@ -1031,6 +1030,10 @@ func (b *PlanBuilder) buildLateralJoin(ctx context.Context, leftPlan, rightPlan 
 	}
 
 	ap.FullSchema = expression.MergeSchema(lFullSchema, rFullSchema)
+
+	// Mark inner CTEs against FullSchema so correlations via USING/NATURAL
+	// merged columns are detected and the CTE storage is reset per outer row.
+	setIsInApplyForCTE(rightPlan, ap.FullSchema)
 
 	// Note: FullSchema nullability adjustment is not needed for InnerJoin.
 	// When LEFT/RIGHT JOIN support is added, ResetNotNullFlag must be called here.

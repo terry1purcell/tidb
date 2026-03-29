@@ -667,7 +667,15 @@ func findJoinFullSchema(p base.LogicalPlan) (*expression.Schema, types.NameSlice
 func containsLateralTableSource(node ast.ResultSetNode) bool {
 	switch n := node.(type) {
 	case *ast.TableSource:
-		return n.Lateral
+		if n.Lateral {
+			return true
+		}
+		// Descend into the inner source (derived table / set-op) so nested
+		// LATERAL inside a subquery or set-op used as a table source is detected.
+		if inner, ok := n.Source.(ast.ResultSetNode); ok {
+			return containsLateralTableSource(inner)
+		}
+		return false
 	case *ast.Join:
 		// For parenthesized single table refs, the parser creates Join{Left: TableSource, Right: nil}
 		if n.Right == nil {

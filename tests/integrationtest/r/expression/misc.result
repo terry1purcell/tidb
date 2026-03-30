@@ -677,7 +677,7 @@ Error 1235 (42000): This version of TiDB doesn't yet support 'ORDER BY / LIMIT /
 with recursive cte(n) as (select 1 union (select * from cte order by n)) select * from cte;
 Error 1235 (42000): This version of TiDB doesn't yet support 'ORDER BY / LIMIT / SELECT DISTINCT in recursive query block of Common Table Expression'
 with recursive cte(n) as (select 1 union select distinct  * from cte) select * from cte;
-Error 1235 (42000): This version of TiDB doesn't yet support 'SELECT DISTINCT in recursive query block of Common Table Expression'
+Error 1235 (42000): This version of TiDB doesn't yet support 'ORDER BY / LIMIT / SELECT DISTINCT in recursive query block of Common Table Expression'
 with recursive cte(n) as (select 1 union (select * from cte limit 2)) select * from cte;
 Error 1235 (42000): This version of TiDB doesn't yet support 'ORDER BY / LIMIT / SELECT DISTINCT in recursive query block of Common Table Expression'
 with recursive cte(n) as (select 1 union select * from cte, cte c1) select * from cte;

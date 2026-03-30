@@ -4278,7 +4278,7 @@ func (b *PlanBuilder) buildSelect(ctx context.Context, sel *ast.SelectStmt) (p b
 	if b.buildingRecursivePartForCTE {
 		// Check for DISTINCT
 		if sel.Distinct {
-			return nil, plannererrors.ErrNotSupportedYet.GenWithStackByArgs("SELECT DISTINCT in recursive query block of Common Table Expression")
+			return nil, plannererrors.ErrNotSupportedYet.GenWithStackByArgs("ORDER BY / LIMIT / SELECT DISTINCT in recursive query block of Common Table Expression")
 		}
 
 		// Check for ORDER BY and LIMIT - allow them only within LATERAL subqueries

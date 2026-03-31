@@ -279,16 +279,16 @@ where tree.depth < 3
 )
 select id, name, depth from tree order by depth, id, name;
 id	estRows	task	access object	operator info
-Sort	26.00	root		Column#33, planner__core__lateral_join.category.id, planner__core__lateral_join.category.name
-└─Projection	26.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.name, Column#33
+Sort	26.00	root		Column#30, planner__core__lateral_join.category.id, planner__core__lateral_join.category.name
+└─Projection	26.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.name, Column#30
   └─CTEFullScan	26.00	root	CTE:tree	data:CTE_0
 CTE_0	26.00	root		Recursive CTE
-├─Projection(Seed Part)	10.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, 1->Column#12
+├─Projection(Seed Part)	10.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, 1->Column#10
 │ └─IndexReader	10.00	root		index:IndexRangeScan
 │   └─IndexRangeScan	10.00	cop[tikv]	table:category, index:idx_parent(parent_id, sort_order, name)	range:[NULL,NULL], keep order:false, stats:pseudo
-└─Projection(Recursive Part)	16.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, cast(plus(Column#16, 1), bigint BINARY)->Column#29
+└─Projection(Recursive Part)	16.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, cast(plus(Column#14, 1), bigint BINARY)->Column#26
   └─Apply	16.00	root		CARTESIAN inner join
-    ├─Selection(Build)	8.00	root		lt(Column#16, 3)
+    ├─Selection(Build)	8.00	root		lt(Column#14, 3)
     │ └─CTETable	10.00	root		Scan on CTE_0
     └─Limit(Probe)	16.00	root		offset:0, count:2
       └─IndexReader	16.00	root		index:Limit
@@ -311,16 +311,16 @@ where tree.depth < 3
 )
 select id, name, depth from tree order by depth, id, name;
 id	estRows	task	access object	operator info
-Sort	26.00	root		Column#33, planner__core__lateral_join.category.id, planner__core__lateral_join.category.name
-└─Projection	26.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.name, Column#33
+Sort	26.00	root		Column#30, planner__core__lateral_join.category.id, planner__core__lateral_join.category.name
+└─Projection	26.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.name, Column#30
   └─CTEFullScan	26.00	root	CTE:tree	data:CTE_0
 CTE_0	26.00	root		Recursive CTE
-├─Projection(Seed Part)	10.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, 1->Column#12
+├─Projection(Seed Part)	10.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, 1->Column#10
 │ └─IndexReader	10.00	root		index:IndexRangeScan
 │   └─IndexRangeScan	10.00	cop[tikv]	table:category, index:idx_parent(parent_id, sort_order, name)	range:[NULL,NULL], keep order:false, stats:pseudo
-└─Projection(Recursive Part)	16.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, cast(plus(Column#16, 1), bigint BINARY)->Column#29
+└─Projection(Recursive Part)	16.00	root		planner__core__lateral_join.category.id, planner__core__lateral_join.category.parent_id, planner__core__lateral_join.category.name, cast(plus(Column#14, 1), bigint BINARY)->Column#26
   └─Apply	16.00	root		CARTESIAN inner join
-    ├─Selection(Build)	8.00	root		lt(Column#16, 3)
+    ├─Selection(Build)	8.00	root		lt(Column#14, 3)
     │ └─CTETable	10.00	root		Scan on CTE_0
     └─TopN(Probe)	16.00	root		planner__core__lateral_join.category.sort_order, offset:0, count:2
       └─IndexReader	16.00	root		index:TopN

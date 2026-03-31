@@ -40,7 +40,6 @@ go_test(
     name = "cascades_test",
     timeout = "short",
     srcs = [
-        "cascades_test.go",
         "enforcer_rules_test.go",
         "main_test.go",
         "optimize_test.go",
@@ -50,7 +49,7 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":cascades"],
     flaky = True,
-    shard_count = 26,
+    shard_count = 25,
     deps = [
         "//pkg/domain",
         "//pkg/expression",
@@ -64,7 +63,6 @@ go_test(
         "//pkg/planner/memo",
         "//pkg/planner/pattern",
         "//pkg/planner/property",
-        "//pkg/testkit",
         "//pkg/testkit/testdata",
         "//pkg/testkit/testsetup",
         "@com_github_stretchr_testify//require",

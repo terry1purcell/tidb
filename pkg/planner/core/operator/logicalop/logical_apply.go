@@ -237,7 +237,13 @@ func (la *LogicalApply) DeriveStats(childStats []*property.StatsInfo, selfSchema
 			for i := range la.CorCols {
 				outerCols = append(outerCols, &la.CorCols[i].Column)
 			}
-			outerNDV, _ := cardinality.EstimateColsNDVWithMatchedLen(outerCols, childSchema[0], leftProfile)
+			// Use the left child's FullSchema so that redundant USING/NATURAL
+			// columns are visible to NDV estimation; fall back to childSchema[0].
+			leftSchema := childSchema[0]
+			if fs := findChildFullSchema(la.Children()[0]); fs != nil {
+				leftSchema = fs
+			}
+			outerNDV, _ := cardinality.EstimateColsNDVWithMatchedLen(outerCols, leftSchema, leftProfile)
 			rowCount = leftProfile.RowCount * rightProfile.RowCount / math.Max(outerNDV, 1)
 		} else {
 			// No correlation at all: decorrelation will convert this to a plain cross

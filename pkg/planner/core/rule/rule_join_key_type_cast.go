@@ -128,7 +128,7 @@ func extractCastEqPattern(sctx base.PlanContext, cond expression.Expression) (*e
 	evalCtx := sctx.GetExprCtx().GetEvalCtx()
 
 	// Try both orderings: CAST(col) = const and const = CAST(col).
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		castArg, constArg := args[i], args[1-i]
 
 		castSF, ok1 := castArg.(*expression.ScalarFunction)

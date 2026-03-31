@@ -47,7 +47,26 @@ import (
 // CAST(varchar_col AS DOUBLE) = 123.0 stays as a table filter to remove
 // false positives, guaranteeing correctness.
 //
-// This rule also handles join key type cast rewriting (future).
+// For join conditions like t_int.id = t_varchar.id, type coercion produces:
+//
+//	EqualConditions: proj_col_L = proj_col_R  (both type DOUBLE)
+//	Left child Projection:  [..., CAST(int_col AS DOUBLE) -> proj_col_L]
+//	Right child Projection: [..., CAST(varchar_col AS DOUBLE) -> proj_col_R]
+//
+// This rule detects the pattern and rewrites:
+//
+//	EqualConditions: new_col_L = new_col_R  (both type INT)
+//	Left child Projection:  [..., int_col -> new_col_L]            (cast removed)
+//	Right child Projection: [..., CAST(varchar_col AS SIGNED) -> new_col_R]
+//	Guard Selection on VARCHAR side:
+//	  CAST(CAST(varchar_col AS SIGNED) AS DOUBLE) = CAST(varchar_col AS DOUBLE)
+//
+// Limitation: TiDB's expression framework does not distinguish implicit CASTs
+// (inserted by type coercion) from explicit user-written CASTs. If a user
+// writes CAST(int_col AS DOUBLE) = CAST(varchar_col AS DOUBLE) in a join
+// condition, this rule will rewrite it too. In practice the semantic difference
+// is negligible: it only manifests for integers outside DOUBLE's exact range
+// (>2^53), where the INT comparison is arguably more correct than DOUBLE.
 type JoinKeyTypeCastRewriter struct{}
 
 // Optimize implements base.LogicalOptRule.
@@ -70,13 +89,16 @@ func rewriteImplicitCasts(p base.LogicalPlan) bool {
 		}
 	}
 
-	if ds, ok := p.(*logicalop.DataSource); ok {
-		if rewriteDataSourceCastPredicates(ds) {
+	switch x := p.(type) {
+	case *logicalop.DataSource:
+		if rewriteDataSourceCastPredicates(x) {
+			changed = true
+		}
+	case *logicalop.LogicalJoin:
+		if rewriteJoinEqConds(x) {
 			changed = true
 		}
 	}
-
-	// TODO: handle LogicalJoin for join key type cast rewriting.
 
 	return changed
 }
@@ -191,6 +213,13 @@ func extractCastEqPattern(sctx base.PlanContext, cond expression.Expression) (*e
 // TiDB's StrToFloat (pkg/types/convert.go) calls strings.TrimSpace first,
 // then getValidFloatPrefix accepts: +, -, ., 0-9 as valid first characters.
 func validFirstChars(intVal int64) []byte {
+	if intVal == 0 {
+		// Zero also matches empty and non-numeric strings via
+		// CAST(... AS DOUBLE) (e.g. CAST('abc' AS DOUBLE) = 0),
+		// so a prefix filter is not a sound implication here.
+		return nil
+	}
+
 	// All characters stripped by strings.TrimSpace that could precede
 	// the numeric content in the stored string value.
 	wsChars := []byte{' ', '\t', '\n', '\r', '\x0b', '\x0c'}
@@ -199,10 +228,8 @@ func validFirstChars(intVal int64) []byte {
 	case intVal > 0:
 		d := firstSignificantDigit(intVal)
 		return append(wsChars, '+', '.', '0', d)
-	case intVal < 0:
+	default: // intVal < 0
 		return append(wsChars, '-')
-	default: // intVal == 0
-		return append(wsChars, '+', '-', '.', '0')
 	}
 }
 
@@ -257,4 +284,221 @@ func buildPrefixLikePredicate(sctx base.PlanContext, col *expression.Column, int
 		result = expression.NewFunctionInternal(exprCtx, ast.LogicOr, retType, result, likes[i])
 	}
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// Join key type cast rewriting
+// ---------------------------------------------------------------------------
+
+// projCastInfo describes a CAST-to-DOUBLE expression in a child Projection.
+type projCastInfo struct {
+	proj    *logicalop.LogicalProjection
+	exprIdx int                // index in Projection.Exprs
+	origCol *expression.Column // the underlying column inside CAST
+}
+
+// rewriteJoinEqConds scans EqualConditions for DOUBLE-typed column pairs
+// that were produced by CAST-to-DOUBLE Projections, and rewrites INT-vs-VARCHAR
+// cases to use integer equality.
+func rewriteJoinEqConds(join *logicalop.LogicalJoin) bool {
+	if len(join.EqualConditions) == 0 {
+		return false
+	}
+
+	// Both children must be Projections (inserted by column pruning).
+	leftProj, leftOk := join.Children()[0].(*logicalop.LogicalProjection)
+	rightProj, rightOk := join.Children()[1].(*logicalop.LogicalProjection)
+	if !leftOk || !rightOk {
+		return false
+	}
+
+	ctx := join.SCtx()
+	exprCtx := ctx.GetExprCtx()
+	evalCtx := exprCtx.GetEvalCtx()
+	anyChanged := false
+
+	// Track which Projections need guard Selections added, keyed by child index.
+	type guardEntry struct {
+		proj  *logicalop.LogicalProjection
+		conds []expression.Expression
+	}
+	guards := map[int]*guardEntry{}
+
+	// Determine which child index is the preserved (outer) side, if any.
+	// LEFT JOIN preserves left (child 0); RIGHT JOIN preserves right (child 1).
+	preservedChildIdx := -1 // -1 means no preserved side (inner join)
+	switch join.JoinType {
+	case base.LeftOuterJoin:
+		preservedChildIdx = 0
+	case base.RightOuterJoin:
+		preservedChildIdx = 1
+	}
+
+	for eqIdx := 0; eqIdx < len(join.EqualConditions); eqIdx++ {
+		eq := join.EqualConditions[eqIdx]
+
+		// Skip null-safe equality (<=>): the guard uses = which filters
+		// NULLs, breaking NULL<=>NULL semantics.
+		if eq.FuncName.L == ast.NullEQ {
+			continue
+		}
+
+		args := eq.GetArgs()
+		if len(args) != 2 {
+			continue
+		}
+		colL, okL := args[0].(*expression.Column)
+		colR, okR := args[1].(*expression.Column)
+		if !okL || !okR {
+			continue
+		}
+		// Both must be DOUBLE (the telltale sign of implicit CAST).
+		if colL.GetType(evalCtx).EvalType() != types.ETReal || colR.GetType(evalCtx).EvalType() != types.ETReal {
+			continue
+		}
+
+		// Trace each column to its Projection expression.
+		leftInfo := findCastInProj(leftProj, colL, evalCtx)
+		rightInfo := findCastInProj(rightProj, colR, evalCtx)
+		if leftInfo == nil || rightInfo == nil {
+			continue
+		}
+
+		// Classify: one side must be signed INT, the other STRING.
+		intInfo, strInfo := classifyCastPair(leftInfo, rightInfo, evalCtx)
+		if intInfo == nil || strInfo == nil {
+			continue
+		}
+
+		// Skip if the VARCHAR side is the preserved (outer) side of an
+		// outer join. Pushing a guard filter there would incorrectly
+		// remove rows that should be preserved with NULL-padded columns.
+		strChildIdx := 1
+		if strInfo.proj == leftProj {
+			strChildIdx = 0
+		}
+		if strChildIdx == preservedChildIdx {
+			continue
+		}
+
+		// INT side: add a pass-through of the bare int column, keeping
+		// origCol.UniqueID so the index join builder can match it to the
+		// table's PK/index.
+		newIntCol := &expression.Column{
+			UniqueID: intInfo.origCol.UniqueID,
+			RetType:  intInfo.origCol.RetType.Clone(),
+		}
+		intInfo.proj.Exprs = append(intInfo.proj.Exprs, intInfo.origCol.Clone())
+		intInfo.proj.Schema().Append(newIntCol)
+
+		// VARCHAR side: add CAST(varchar_col AS SIGNED). We allocate a new
+		// UniqueID because the data type changes (VARCHAR→INT).
+		castIntExpr := expression.WrapWithCastAsInt(exprCtx, strInfo.origCol.Clone(), intInfo.origCol.RetType)
+		newStrCol := &expression.Column{
+			UniqueID: ctx.GetSessionVars().AllocPlanColumnID(),
+			RetType:  castIntExpr.GetType(evalCtx).Clone(),
+		}
+		strInfo.proj.Exprs = append(strInfo.proj.Exprs, castIntExpr)
+		strInfo.proj.Schema().Append(newStrCol)
+
+		// Accumulate guard condition for the VARCHAR-side Projection.
+		if guards[strChildIdx] == nil {
+			guards[strChildIdx] = &guardEntry{proj: strInfo.proj}
+		}
+		guardLeft := expression.WrapWithCastAsReal(exprCtx, expression.WrapWithCastAsInt(exprCtx, strInfo.origCol.Clone(), intInfo.origCol.RetType))
+		guardRight := expression.WrapWithCastAsReal(exprCtx, strInfo.origCol.Clone())
+		guard := expression.NewFunctionInternal(
+			exprCtx,
+			ast.EQ,
+			types.NewFieldType(mysql.TypeTiny),
+			guardLeft,
+			guardRight,
+		)
+		guards[strChildIdx].conds = append(guards[strChildIdx].conds, guard)
+
+		// Replace the EQ condition with a new one using the NEW columns.
+		var newLeftCol, newRightCol *expression.Column
+		if intInfo.proj == leftProj {
+			newLeftCol, newRightCol = newIntCol, newStrCol
+		} else {
+			newLeftCol, newRightCol = newStrCol, newIntCol
+		}
+		newEq := expression.NewFunctionInternal(
+			exprCtx,
+			eq.FuncName.L,
+			types.NewFieldType(mysql.TypeTiny),
+			newLeftCol.Clone(),
+			newRightCol.Clone(),
+		)
+		if sf, ok := newEq.(*expression.ScalarFunction); ok {
+			join.EqualConditions[eqIdx] = sf
+		}
+
+		anyChanged = true
+	}
+
+	// Insert guard Selections below the affected Projections.
+	for _, g := range guards {
+		projChild := g.proj.Children()[0]
+		sel := logicalop.LogicalSelection{Conditions: g.conds}.Init(ctx, join.QueryBlockOffset())
+		sel.SetChildren(projChild)
+		g.proj.SetChildren(sel)
+	}
+
+	return anyChanged
+}
+
+// findCastInProj looks up a column in a Projection's schema and checks if the
+// corresponding expression is CAST(col AS DOUBLE). Returns nil if not matched.
+func findCastInProj(proj *logicalop.LogicalProjection, col *expression.Column, evalCtx expression.EvalContext) *projCastInfo {
+	schema := proj.Schema()
+	for i, schemaCol := range schema.Columns {
+		if schemaCol.UniqueID != col.UniqueID {
+			continue
+		}
+		if i >= len(proj.Exprs) {
+			return nil
+		}
+		sf, ok := proj.Exprs[i].(*expression.ScalarFunction)
+		if !ok || sf.FuncName.L != ast.Cast {
+			return nil
+		}
+		if sf.GetType(evalCtx).EvalType() != types.ETReal {
+			return nil
+		}
+		args := sf.GetArgs()
+		if len(args) != 1 {
+			return nil
+		}
+		origCol, ok := args[0].(*expression.Column)
+		if !ok {
+			return nil
+		}
+		return &projCastInfo{
+			proj:    proj,
+			exprIdx: i,
+			origCol: origCol,
+		}
+	}
+	return nil
+}
+
+// classifyCastPair determines which side is INT (signed) and which is STRING.
+func classifyCastPair(leftInfo, rightInfo *projCastInfo, evalCtx expression.EvalContext) (intInfo, strInfo *projCastInfo) {
+	isSignedInt := func(info *projCastInfo) bool {
+		tp := info.origCol.GetType(evalCtx)
+		return tp.EvalType() == types.ETInt && !mysql.HasUnsignedFlag(tp.GetFlag())
+	}
+	isStr := func(info *projCastInfo) bool {
+		return info.origCol.GetType(evalCtx).EvalType().IsStringKind()
+	}
+
+	switch {
+	case isSignedInt(leftInfo) && isStr(rightInfo):
+		return leftInfo, rightInfo
+	case isStr(leftInfo) && isSignedInt(rightInfo):
+		return rightInfo, leftInfo
+	default:
+		return nil, nil
+	}
 }

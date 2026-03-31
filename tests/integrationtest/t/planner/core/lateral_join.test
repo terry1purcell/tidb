@@ -43,8 +43,11 @@ create table t2 (a int, b varchar(10));
 insert into t2 values (1, 'a'), (1, 'b'), (2, 'c'), (3, 'd');
 
 ## Recursive CTE with LATERAL join - empty string seed
+## Note: cast('' as char(10)) is needed because recursive CTE column types are
+## determined solely by the seed part (MySQL-compatible behavior). Without the
+## cast, '' gives varchar(0) which truncates all recursive results.
 with recursive tr (level, b_col) as (
-    select 1, ''
+    select 1, cast('' as char(10))
     union all
     select level + 1, lat.result_col
     from tr, lateral (select b as result_col from t2 where a = level order by b limit 1) as lat

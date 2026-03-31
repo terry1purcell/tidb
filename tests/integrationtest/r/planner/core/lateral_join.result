@@ -52,7 +52,7 @@ drop table if exists t2;
 create table t2 (a int, b varchar(10));
 insert into t2 values (1, 'a'), (1, 'b'), (2, 'c'), (3, 'd');
 with recursive tr (level, b_col) as (
-select 1, ''
+select 1, cast('' as char(10))
 union all
 select level + 1, lat.result_col
 from tr, lateral (select b as result_col from t2 where a = level order by b limit 1) as lat
@@ -61,8 +61,8 @@ where level < 3
 select * from tr where level > 0 order by level;
 level	b_col
 1	
-2	
-3	
+2	a
+3	c
 with recursive tr (level, b_col) as (
 select 1, cast(null as char(10))
 union all

@@ -6,7 +6,7 @@ insert into t1 values (1), (2), (3);
 insert into t2 values (1, 'a'), (1, 'b'), (2, 'c'), (3, 'd'), (3, 'e');
 
 ## Basic LATERAL join with comma syntax
-select * from t1, lateral (select b from t2 where t2.a = t1.a limit 1) as lat order by t1.a;
+select * from t1, lateral (select b from t2 where t2.a = t1.a order by b limit 1) as lat order by t1.a;
 
 ## LATERAL with ORDER BY in subquery
 select * from t1, lateral (select b from t2 where t2.a = t1.a order by b limit 1) as lat order by t1.a;
@@ -32,10 +32,10 @@ create table t1 (a int);
 create table t2 (a int, b varchar(10));
 
 ## Verify Apply operator is used for LATERAL (comma syntax); LIMIT prevents decorrelation
-explain format='plan_tree' select * from t1, lateral (select b from t2 where t2.a = t1.a limit 1) as lat;
+explain format='brief' select * from t1, lateral (select b from t2 where t2.a = t1.a limit 1) as lat;
 
 ## Verify Apply operator for INNER JOIN LATERAL; LIMIT prevents decorrelation
-explain format='plan_tree' select * from t1 join lateral (select b from t2 where t2.a = t1.a limit 1) as lat on true;
+explain format='brief' select * from t1 join lateral (select b from t2 where t2.a = t1.a limit 1) as lat on true;
 
 # TestLateralJoinWithRecursiveCTE
 drop table if exists t2;
@@ -72,7 +72,7 @@ insert into t2 values (1, 10), (1, 20), (2, 30);
 insert into t3 values (10, 'x'), (20, 'y'), (30, 'z');
 
 ## LATERAL with multiple left-side tables
-select * from t1, t2, lateral (select c from t3 where t3.b = t2.b limit 1) as lat
+select * from t1, t2, lateral (select c from t3 where t3.b = t2.b order by c limit 1) as lat
 where t1.a = t2.a order by t1.a, t2.b;
 
 # TestLateralJoinNested
@@ -95,7 +95,7 @@ insert into t1 values (1), (2);
 insert into t2 values (10), (20);
 
 ## LATERAL without correlation (should still work)
-select * from t1, lateral (select b from t2 limit 1) as lat order by t1.a;
+select * from t1, lateral (select b from t2 order by b limit 1) as lat order by t1.a;
 
 # TestLateralJoinRightJoinError
 drop table if exists t1, t2;
@@ -122,13 +122,13 @@ insert into t3 values (1, 10, 301), (2, 20, 302);
 insert into t4 values (1, 10, 401), (1, 10, 402), (2, 20, 403);
 
 ## EXPLAIN: LATERAL + USING + ON must show Apply, not plain Join
-explain format='plan_tree' select * from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select count(*) as c from t4 where t4.a=t2.a) as dt;
+explain format='brief' select * from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select count(*) as c from t4 where t4.a=t2.a) as dt;
 
 ## Correctness: verify result set matches nested-loop semantics
 select t1.a, t2.b, t3.c, dt.c from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select count(*) as c from t4 where t4.a=t2.a) as dt order by t1.a;
 
 ## EXPLAIN: LATERAL + USING + ON with aggregate that blocks decorrelation
-explain format='plan_tree' select * from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select sum(t4.c) as s from t4 where t4.a=t2.a) as dt;
+explain format='brief' select * from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select sum(t4.c) as s from t4 where t4.a=t2.a) as dt;
 
 # TestLateralJoinColumnAlias
 ## Column alias list AS dt(col1, ...) renames output columns of a derived table.
@@ -218,7 +218,7 @@ select id, name, depth from tree order by depth, id, name;
 ## EXPLAIN (with redundant parent_id in ORDER BY): ORDER BY parent_id, sort_order is a
 ## direct prefix of idx_parent(parent_id, sort_order, name), so TiDB sets keep order:true
 ## and pushes Limit to TiKV - scanning stops as soon as 2 rows are read per parent.
-explain format='plan_tree' with recursive tree as (
+explain format='brief' with recursive tree as (
   select id, parent_id, name, 1 as depth
   from category where parent_id is null
   union all
@@ -243,7 +243,7 @@ select id, name, depth from tree order by depth, id, name;
 ## TODO(planner): teach the Apply probe optimizer to strip equality-filtered leading
 ## index columns from the ORDER BY check, so ORDER BY sort_order produces Limit here
 ## instead of TopN - making the redundant parent_id column unnecessary.
-explain format='plan_tree' with recursive tree as (
+explain format='brief' with recursive tree as (
   select id, parent_id, name, 1 as depth
   from category where parent_id is null
   union all

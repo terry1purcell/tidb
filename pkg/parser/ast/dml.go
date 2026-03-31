@@ -559,10 +559,10 @@ func (n *TableSource) Restore(ctx *format.RestoreCtx) error {
 		isDerived = true
 	}
 	if n.Lateral && !isDerived {
-		return errors.New("LATERAL cannot be applied to a table name, only to derived tables")
+		return errors.New("LATERAL can only be applied to a derived table (subquery), not to a non-derived source")
 	}
 	if len(n.ColumnNames) > 0 && !isDerived {
-		return errors.New("column alias list cannot be applied to a table name")
+		return errors.New("column alias list can only be applied to a derived table (subquery), not to a non-derived source")
 	}
 	if len(n.ColumnNames) > 0 && n.AsName.String() == "" {
 		return errors.New("column list provided without alias for derived table")

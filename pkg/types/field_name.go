@@ -72,6 +72,9 @@ func (name *FieldName) MemoryUsage() (sum int64) {
 // Clone returns a shallow copy of the FieldName struct.
 // All fields are value types (CIStr, bool), so a shallow copy is a full copy.
 func (name *FieldName) Clone() *FieldName {
+	if name == nil {
+		return nil
+	}
 	cloned := *name
 	return &cloned
 }

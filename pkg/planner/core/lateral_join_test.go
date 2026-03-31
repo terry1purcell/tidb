@@ -44,9 +44,10 @@ func TestLateralJoinPlanBuilding(t *testing.T) {
 			expectApply: true,
 		},
 		{
-			name:        "LATERAL with LEFT JOIN not yet supported",
-			sql:         "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.b) AS dt ON true",
-			expectError: true,
+			name:              "LATERAL with LEFT JOIN not yet supported",
+			sql:               "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.b) AS dt ON true",
+			expectError:       true,
+			expectedErrorCode: 3809,
 		},
 		{
 			name:        "LATERAL with CROSS JOIN builds LogicalApply",
@@ -54,9 +55,10 @@ func TestLateralJoinPlanBuilding(t *testing.T) {
 			expectApply: true,
 		},
 		{
-			name:        "LATERAL with RIGHT JOIN not yet supported",
-			sql:         "SELECT * FROM t RIGHT JOIN LATERAL (SELECT t.a) AS dt ON true",
-			expectError: true,
+			name:              "LATERAL with RIGHT JOIN not yet supported",
+			sql:               "SELECT * FROM t RIGHT JOIN LATERAL (SELECT t.a) AS dt ON true",
+			expectError:       true,
+			expectedErrorCode: 3809,
 		},
 		{
 			name:        "Non-LATERAL derived table does not build LogicalApply",
@@ -327,14 +329,16 @@ func TestLateralJoinErrorPaths(t *testing.T) {
 		expectedErrorCode int
 	}{
 		{
-			name:        "RIGHT JOIN with LATERAL not yet supported",
-			sql:         "SELECT * FROM t RIGHT JOIN LATERAL (SELECT t.a) AS dt ON true",
-			expectError: true,
+			name:              "RIGHT JOIN with LATERAL not yet supported",
+			sql:               "SELECT * FROM t RIGHT JOIN LATERAL (SELECT t.a) AS dt ON true",
+			expectError:       true,
+			expectedErrorCode: 3809,
 		},
 		{
-			name:        "LEFT JOIN with LATERAL not yet supported",
-			sql:         "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.a) AS dt ON true",
-			expectError: true,
+			name:              "LEFT JOIN with LATERAL not yet supported",
+			sql:               "SELECT * FROM t LEFT JOIN LATERAL (SELECT t.a) AS dt ON true",
+			expectError:       true,
+			expectedErrorCode: 3809,
 		},
 		{
 			name:        "CROSS JOIN with LATERAL is valid",

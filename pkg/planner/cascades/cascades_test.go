@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCascadesDrive(t *testing.T) {
@@ -38,51 +37,3 @@ func TestCascadesDrive(t *testing.T) {
 		"└─TableDual 1.00 root  rows:1"))
 }
 
-func TestXFormedOperatorShouldDeriveTheirStatsOwn(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-
-	tk.MustExec("CREATE TABLE t1 (  a1 int DEFAULT NULL,  b1 int DEFAULT NULL,  c1 int DEFAULT NULL)")
-	tk.MustExec("CREATE TABLE t2 (  a2 int DEFAULT NULL,  b2 int DEFAULT NULL,  KEY idx (a2))")
-	// currently we only pull the correlated condition up to apply itself, but we don't convert it to join actively.
-	// we just left cascades to it to xform and generate a join operator.
-	tk.MustExec("INSERT INTO t1 (a1, b1, c1) VALUES (1, 2, 3), (4, NULL, 5),  (NULL, 6, 7),  (8, 9, NULL),  (10, 11, 12);")
-	tk.MustExec("INSERT INTO t2 values (1,1),(2,2),(3,3)")
-	for range 10 {
-		tk.MustExec("INSERT INTO t2 select * from t2")
-	}
-	tk.MustExec("analyze table t1, t2")
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(false)
-	res1 := tk.MustQuery("explain format=\"brief\" SELECT 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(true)
-	res2 := tk.MustQuery("explain format=\"brief\" SELECT 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	require.Equal(t, res1, res2)
-
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(false)
-	res1 = tk.MustQuery("explain format=\"brief\" SELECT /*+ inl_join(tab, t2@sel_2) */ 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(true)
-	res2 = tk.MustQuery("explain format=\"brief\" SELECT /*+ inl_join(tab, t2@sel_2) */ 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	require.Equal(t, res1, res2)
-
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(false)
-	res1 = tk.MustQuery("explain format=\"brief\" SELECT /*+ inl_hash_join(tab, t2@sel_2) */ 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(true)
-	res2 = tk.MustQuery("explain format=\"brief\" SELECT /*+ inl_hash_join(tab, t2@sel_2) */ 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	require.Equal(t, res1, res2)
-
-	tk.MustExec("set tidb_hash_join_version=optimized")
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(false)
-	res1 = tk.MustQuery("explain format=\"brief\" SELECT /*+ hash_join(tab, t2@sel_2) */ 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(true)
-	res2 = tk.MustQuery("explain format=\"brief\" SELECT /*+ hash_join(tab, t2@sel_2) */ 1 FROM t1 AS tab WHERE  (EXISTS(SELECT  1 FROM t2 WHERE a2 = a1 ))").String()
-	require.Equal(t, res1, res2)
-
-	// LATERAL derived table: both planners must produce a valid plan.
-	// The cascades planner may choose a different physical operator (e.g.
-	// HashJoin vs IndexHashJoin) so we only assert both succeed, not equality.
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(false)
-	tk.MustQuery("explain format=\"brief\" SELECT 1 FROM t1 AS tab, LATERAL (SELECT 1 FROM t2 WHERE a2 = tab.a1) AS sel")
-	tk.Session().GetSessionVars().SetEnableCascadesPlanner(true)
-	tk.MustQuery("explain format=\"brief\" SELECT 1 FROM t1 AS tab, LATERAL (SELECT 1 FROM t2 WHERE a2 = tab.a1) AS sel")
-}

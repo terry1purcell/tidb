@@ -698,7 +698,7 @@ WITH RECURSIVE cte AS (
 )
 SELECT * FROM cte`,
 			expectError: true,
-			errorMsg:    "ORDER BY / LIMIT in recursive query block",
+			errorMsg:    "ORDER BY / LIMIT / SELECT DISTINCT in recursive query block",
 		},
 		{
 			name: "Recursive CTE with non-LATERAL LIMIT - should fail",
@@ -710,7 +710,7 @@ WITH RECURSIVE cte AS (
 )
 SELECT * FROM cte`,
 			expectError: true,
-			errorMsg:    "ORDER BY / LIMIT in recursive query block",
+			errorMsg:    "ORDER BY / LIMIT / SELECT DISTINCT in recursive query block",
 		},
 		{
 			name: "Recursive CTE with comma LATERAL and ORDER BY/LIMIT - should work",
@@ -764,7 +764,7 @@ WITH RECURSIVE cte AS (
 )
 SELECT * FROM cte`,
 			expectError: true,
-			errorMsg:    "ORDER BY / LIMIT in recursive query block",
+			errorMsg:    "ORDER BY / LIMIT / SELECT DISTINCT in recursive query block",
 		},
 	}
 

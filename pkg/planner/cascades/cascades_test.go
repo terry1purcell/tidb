@@ -36,4 +36,3 @@ func TestCascadesDrive(t *testing.T) {
 		"Projection 1.00 root  1->Column#1",
 		"└─TableDual 1.00 root  rows:1"))
 }
-

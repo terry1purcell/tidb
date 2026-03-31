@@ -124,7 +124,7 @@ insert into t3 values (1, 10, 301), (2, 20, 302);
 insert into t4 values (1, 10, 401), (1, 10, 402), (2, 20, 403);
 explain format='brief' select * from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select count(*) as c from t4 where t4.a=t2.a) as dt;
 id	estRows	task	access object	operator info
-Projection	1.95	root		planner__core__lateral_join.t1.a, planner__core__lateral_join.t1.b, planner__core__lateral_join.t1.c, planner__core__lateral_join.t2.b, planner__core__lateral_join.t2.c, planner__core__lateral_join.t3.a, planner__core__lateral_join.t3.b, planner__core__lateral_join.t3.c, Column#21
+Projection	1.95	root		planner__core__lateral_join.t1.a, planner__core__lateral_join.t1.b, planner__core__lateral_join.t1.c, planner__core__lateral_join.t2.b, planner__core__lateral_join.t2.c, planner__core__lateral_join.t3.a, planner__core__lateral_join.t3.b, planner__core__lateral_join.t3.c, Column#17
 └─Apply	1.95	root		CARTESIAN inner join
   ├─Projection(Build)	15593.77	root		planner__core__lateral_join.t1.a, planner__core__lateral_join.t1.b, planner__core__lateral_join.t1.c, planner__core__lateral_join.t2.a, planner__core__lateral_join.t2.b, planner__core__lateral_join.t2.c, planner__core__lateral_join.t3.a, planner__core__lateral_join.t3.b, planner__core__lateral_join.t3.c
   │ └─HashJoin	15593.77	root		inner join, equal:[eq(planner__core__lateral_join.t2.b, planner__core__lateral_join.t3.b)]
@@ -138,9 +138,9 @@ Projection	1.95	root		planner__core__lateral_join.t1.a, planner__core__lateral_j
   │     └─TableReader(Probe)	9990.00	root		data:Selection
   │       └─Selection	9990.00	cop[tikv]		not(isnull(planner__core__lateral_join.t1.a))
   │         └─TableFullScan	10000.00	cop[tikv]	table:t1	keep order:false, stats:pseudo
-  └─StreamAgg(Probe)	15593.77	root		funcs:count(Column#23)->Column#21
+  └─StreamAgg(Probe)	15593.77	root		funcs:count(Column#19)->Column#17
     └─TableReader	15593.77	root		data:StreamAgg
-      └─StreamAgg	15593.77	cop[tikv]		funcs:count(1)->Column#23
+      └─StreamAgg	15593.77	cop[tikv]		funcs:count(1)->Column#19
         └─Selection	155937.66	cop[tikv]		eq(planner__core__lateral_join.t4.a, planner__core__lateral_join.t2.a)
           └─TableFullScan	155937656.25	cop[tikv]	table:t4	keep order:false, stats:pseudo
 select t1.a, t2.b, t3.c, dt.c from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select count(*) as c from t4 where t4.a=t2.a) as dt order by t1.a;
@@ -149,7 +149,7 @@ a	b	c	c
 2	20	302	1
 explain format='brief' select * from t1 join t2 using(a) join t3 on t2.b=t3.b, lateral (select sum(t4.c) as s from t4 where t4.a=t2.a) as dt;
 id	estRows	task	access object	operator info
-Projection	1.95	root		planner__core__lateral_join.t1.a, planner__core__lateral_join.t1.b, planner__core__lateral_join.t1.c, planner__core__lateral_join.t2.b, planner__core__lateral_join.t2.c, planner__core__lateral_join.t3.a, planner__core__lateral_join.t3.b, planner__core__lateral_join.t3.c, Column#21
+Projection	1.95	root		planner__core__lateral_join.t1.a, planner__core__lateral_join.t1.b, planner__core__lateral_join.t1.c, planner__core__lateral_join.t2.b, planner__core__lateral_join.t2.c, planner__core__lateral_join.t3.a, planner__core__lateral_join.t3.b, planner__core__lateral_join.t3.c, Column#17
 └─Apply	1.95	root		CARTESIAN inner join
   ├─Projection(Build)	15593.77	root		planner__core__lateral_join.t1.a, planner__core__lateral_join.t1.b, planner__core__lateral_join.t1.c, planner__core__lateral_join.t2.a, planner__core__lateral_join.t2.b, planner__core__lateral_join.t2.c, planner__core__lateral_join.t3.a, planner__core__lateral_join.t3.b, planner__core__lateral_join.t3.c
   │ └─HashJoin	15593.77	root		inner join, equal:[eq(planner__core__lateral_join.t2.b, planner__core__lateral_join.t3.b)]
@@ -163,9 +163,9 @@ Projection	1.95	root		planner__core__lateral_join.t1.a, planner__core__lateral_j
   │     └─TableReader(Probe)	9990.00	root		data:Selection
   │       └─Selection	9990.00	cop[tikv]		not(isnull(planner__core__lateral_join.t1.a))
   │         └─TableFullScan	10000.00	cop[tikv]	table:t1	keep order:false, stats:pseudo
-  └─StreamAgg(Probe)	15593.77	root		funcs:sum(Column#23)->Column#21
+  └─StreamAgg(Probe)	15593.77	root		funcs:sum(Column#19)->Column#17
     └─TableReader	15593.77	root		data:StreamAgg
-      └─StreamAgg	15593.77	cop[tikv]		funcs:sum(planner__core__lateral_join.t4.c)->Column#23
+      └─StreamAgg	15593.77	cop[tikv]		funcs:sum(planner__core__lateral_join.t4.c)->Column#19
         └─Selection	155937.66	cop[tikv]		eq(planner__core__lateral_join.t4.a, planner__core__lateral_join.t2.a)
           └─TableFullScan	155937656.25	cop[tikv]	table:t4	keep order:false, stats:pseudo
 drop table if exists t1, t2;

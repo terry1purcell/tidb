@@ -1,0 +1,67 @@
+# Test implicit cast predicate optimization: WHERE varchar_col = int_const
+# This rule adds OR-of-LIKE prefix predicates so the ranger can build index
+# ranges on the VARCHAR column, while keeping the original CAST equality as
+# a correctness filter.
+
+drop table if exists t_cast;
+create table t_cast (
+  id int primary key,
+  name varchar(20),
+  key idx_name(name)
+);
+
+insert into t_cast values
+  (1, '123'),
+  (2, '0123'),
+  (3, ' 123'),
+  (4, '+123'),
+  (5, '123.0'),
+  (6, '456'),
+  (7, '-123'),
+  (8, NULL),
+  (9, '0'),
+  (10, '+0'),
+  (11, '-0'),
+  (12, '.0'),
+  (13, 'abc'),
+  (14, '999999999999999999'),
+  (15, '9007199254740992'),
+  (16, '09007199254740992');
+
+# Positive integer: should use index with LIKE prefix ranges
+explain format='brief' select * from t_cast where name = 123;
+
+# Verify correctness: all string representations of 123 must be returned
+select * from t_cast where name = 123 order by id;
+
+# Negative integer
+explain format='brief' select * from t_cast where name = -123;
+select * from t_cast where name = -123 order by id;
+
+# Zero: several representations
+explain format='brief' select * from t_cast where name = 0;
+select * from t_cast where name = 0 order by id;
+
+# Non-integer constant: should NOT trigger the optimization
+explain format='brief' select * from t_cast where name = 123.5;
+
+# String-to-string comparison: should NOT trigger (no CAST involved)
+explain format='brief' select * from t_cast where name = '123';
+
+# Multiple conditions: optimization should apply alongside other predicates
+explain format='brief' select * from t_cast where name = 123 and id > 0;
+
+# NULL constant: should NOT trigger
+explain format='brief' select * from t_cast where name = NULL;
+
+# Large integer beyond 2^53: should NOT trigger optimization (DOUBLE precision loss)
+explain format='brief' select * from t_cast where name = 999999999999999999;
+
+# Large integer at 2^53 boundary: should trigger (DOUBLE exact range)
+explain format='brief' select * from t_cast where name = 9007199254740992;
+select * from t_cast where name = 9007199254740992 order by id;
+
+# 'abc' matches 0 as DOUBLE: should be returned for = 0
+# (already tested above in the zero case)
+
+drop table t_cast;

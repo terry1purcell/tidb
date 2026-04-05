@@ -21,6 +21,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// requireTrivialPlan asserts that the most recently executed statement did (or
+// did not) use the trivial plan fast path, by checking @@last_plan_from_trivial.
+func requireTrivialPlan(t *testing.T, tk *testkit.TestKit, expected bool) {
+	t.Helper()
+	val := "0"
+	if expected {
+		val = "1"
+	}
+	tk.MustQuery("select @@last_plan_from_trivial").Check(testkit.Rows(val))
+}
+
 func TestTrivialPlan(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -36,17 +47,36 @@ func TestTrivialPlan(t *testing.T) {
 	require.Len(t, rows, 3)
 	require.Equal(t, "1", rows[0][0])
 	require.Equal(t, "hello", rows[0][2])
+	requireTrivialPlan(t, tk, true)
 
 	// SELECT with specific columns.
 	rows = tk.MustQuery("select a, c from t_simple").Sort().Rows()
 	require.Len(t, rows, 3)
 	require.Equal(t, "foo", rows[2][1])
+	requireTrivialPlan(t, tk, true)
 
 	// SELECT with column alias.
 	rows = tk.MustQuery("select a as id, b as val from t_simple").Sort().Rows()
 	require.Len(t, rows, 3)
+	requireTrivialPlan(t, tk, true)
 
-	// Verify EXPLAIN shows a table scan plan.
+	// SELECT with reordered columns (verifies column mapping correctness).
+	rows = tk.MustQuery("select c, a from t_simple").Sort().Rows()
+	require.Len(t, rows, 3)
+	// Sorted by first column (c): "foo"→3, "hello"→1, "world"→2
+	require.Equal(t, "foo", rows[0][0])
+	require.Equal(t, "3", rows[0][1])
+	require.Equal(t, "hello", rows[1][0])
+	require.Equal(t, "1", rows[1][1])
+	requireTrivialPlan(t, tk, true)
+
+	// SELECT with duplicate column references.
+	rows = tk.MustQuery("select a, a from t_simple").Sort().Rows()
+	require.Len(t, rows, 3)
+	require.Equal(t, rows[0][0], rows[0][1])
+	requireTrivialPlan(t, tk, true)
+
+	// Verify EXPLAIN shows a table scan plan (EXPLAIN uses normal optimizer).
 	tk.MustQuery("explain format = 'brief' select * from t_simple").Check(testkit.Rows(
 		"TableReader 10000.00 root  data:TableFullScan",
 		"└─TableFullScan 10000.00 cop[tikv] table:t_simple keep order:false, stats:pseudo",
@@ -65,18 +95,21 @@ func TestTrivialPlanFallback(t *testing.T) {
 	tk.MustExec("insert into t_idx values(1, 10), (2, 20)")
 	rows := tk.MustQuery("select * from t_idx").Sort().Rows()
 	require.Len(t, rows, 2)
+	requireTrivialPlan(t, tk, false)
 
 	// Partitioned table — should NOT use trivial plan.
 	tk.MustExec("create table t_part(a int primary key, b int) partition by hash(a) partitions 4")
 	tk.MustExec("insert into t_part values(1, 10), (2, 20)")
 	rows = tk.MustQuery("select * from t_part").Sort().Rows()
 	require.Len(t, rows, 2)
+	requireTrivialPlan(t, tk, false)
 
 	// Table with virtual generated column — should NOT use trivial plan.
 	tk.MustExec("create table t_gen(a int primary key, b int, c int as (a + b))")
 	tk.MustExec("insert into t_gen(a, b) values(1, 10), (2, 20)")
 	rows = tk.MustQuery("select * from t_gen").Sort().Rows()
 	require.Len(t, rows, 2)
+	requireTrivialPlan(t, tk, false)
 
 	// Query with WHERE clause on a trivial table — should NOT use trivial plan.
 	tk.MustExec("drop table if exists t_no_idx")
@@ -84,21 +117,41 @@ func TestTrivialPlanFallback(t *testing.T) {
 	tk.MustExec("insert into t_no_idx values(1, 10), (2, 20)")
 	rows = tk.MustQuery("select * from t_no_idx where b > 5").Rows()
 	require.Len(t, rows, 2)
+	requireTrivialPlan(t, tk, false)
 
 	// Query with ORDER BY — should NOT use trivial plan.
 	rows = tk.MustQuery("select * from t_no_idx order by b").Rows()
 	require.Len(t, rows, 2)
+	requireTrivialPlan(t, tk, false)
 
 	// Query with LIMIT — should NOT use trivial plan.
 	rows = tk.MustQuery("select * from t_no_idx limit 1").Rows()
 	require.Len(t, rows, 1)
+	requireTrivialPlan(t, tk, false)
 
 	// Query with DISTINCT — should NOT use trivial plan.
 	rows = tk.MustQuery("select distinct b from t_no_idx").Rows()
 	require.Len(t, rows, 2)
+	requireTrivialPlan(t, tk, false)
 
 	// Query with expression in SELECT — should NOT use trivial plan
 	// (buildSchemaFromFields returns nil for non-column expressions).
 	rows = tk.MustQuery("select a + 1 from t_no_idx").Rows()
 	require.Len(t, rows, 2)
+	requireTrivialPlan(t, tk, false)
+
+	// sql_select_limit — should NOT use trivial plan.
+	tk.MustExec("set @@sql_select_limit = 1")
+	rows = tk.MustQuery("select * from t_no_idx").Rows()
+	require.Len(t, rows, 1)
+	requireTrivialPlan(t, tk, false)
+	tk.MustExec("set @@sql_select_limit = default")
+
+	// Dirty transaction (uncommitted writes) — should NOT use trivial plan.
+	tk.MustExec("begin")
+	tk.MustExec("insert into t_no_idx values(3, 30)")
+	rows = tk.MustQuery("select * from t_no_idx").Sort().Rows()
+	require.Len(t, rows, 3)
+	requireTrivialPlan(t, tk, false)
+	tk.MustExec("rollback")
 }

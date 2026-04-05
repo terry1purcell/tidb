@@ -15,6 +15,8 @@
 package core
 
 import (
+	"math"
+
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
@@ -56,6 +58,13 @@ func TryTrivialPlan(ctx base.PlanContext, node *resolve.NodeW) (base.Plan, types
 		return nil, nil
 	}
 
+	// When sql_select_limit is set, the full optimizer injects an extra LIMIT
+	// via TryAddExtraLimit. The trivial plan bypasses that rewrite, so bail
+	// out and let the normal path handle it.
+	if ctx.GetSessionVars().SelectLimit != math.MaxUint64 {
+		return nil, nil
+	}
+
 	sel, ok := node.Node.(*ast.SelectStmt)
 	if !ok {
 		return nil, nil
@@ -71,6 +80,11 @@ func TryTrivialPlan(ctx base.PlanContext, node *resolve.NodeW) (base.Plan, types
 	}
 	// Index hints (USE/FORCE/IGNORE INDEX) affect path selection.
 	if len(tblName.IndexHints) > 0 {
+		return nil, nil
+	}
+	// Explicit PARTITION clauses need the full planner: partitioned tables
+	// need partition pruning, and non-partitioned tables must error.
+	if len(tblName.PartitionNames) > 0 {
 		return nil, nil
 	}
 
@@ -105,6 +119,20 @@ func TryTrivialPlan(ctx base.PlanContext, node *resolve.NodeW) (base.Plan, types
 		return nil, nil
 	}
 
+	// Local temp tables use a dummy reader that requires UnionScan to merge
+	// buffered writes. Cached tables also need UnionScan for correctness.
+	// Skip the fast path for both.
+	if tblInfo.TempTableType == model.TempTableLocal ||
+		tblInfo.TableCacheStatusType == model.TableCacheStatusEnable {
+		return nil, nil
+	}
+
+	// When the transaction has uncommitted writes to this table, a UnionScan
+	// is needed to merge the buffer. The trivial plan doesn't build one.
+	if ctx.HasDirtyContent(tblInfo.ID) {
+		return nil, nil
+	}
+
 	// Privilege check.
 	if err := checkFastPlanPrivilege(ctx, dbName.L, tblInfo.Name.L, mysql.SelectPriv); err != nil {
 		return nil, nil
@@ -129,17 +157,17 @@ func TryTrivialPlan(ctx base.PlanContext, node *resolve.NodeW) (base.Plan, types
 		}
 	}
 
-	// Prune scan columns to only those present in the output schema. This
-	// ensures TiKV returns only the columns the client expects.
-	schemaColIDs := make(map[int64]struct{}, schema.Len())
-	for _, col := range schema.Columns {
-		schemaColIDs[col.ID] = struct{}{}
+	// Build scan columns in schema order so that the executor's sequential
+	// OutputOffsets (0, 1, 2, …) align with the schema positions. Iterating
+	// allColumns (table-definition order) would break SELECT reordering like
+	// "SELECT b, a" and duplicate references like "SELECT a, a".
+	colInfoByID := make(map[int64]*model.ColumnInfo, len(allColumns))
+	for _, col := range allColumns {
+		colInfoByID[col.ID] = col
 	}
 	columns := make([]*model.ColumnInfo, 0, schema.Len())
-	for _, col := range allColumns {
-		if _, ok := schemaColIDs[col.ID]; ok {
-			columns = append(columns, col)
-		}
+	for _, col := range schema.Columns {
+		columns = append(columns, colInfoByID[col.ID])
 	}
 
 	// Row count estimate from stats cache (no synchronous loading).
@@ -173,6 +201,7 @@ func TryTrivialPlan(ctx base.PlanContext, node *resolve.NodeW) (base.Plan, types
 		Columns:         columns,
 		DBName:          dbName,
 		TableAsName:     &tblAlias,
+		PhysicalTableID: tblInfo.ID,
 		Ranges:          scanRanges,
 		AccessCondition: nil,
 		StoreType:       kv.TiKV,

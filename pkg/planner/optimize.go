@@ -262,6 +262,7 @@ func optimizeNoCache(ctx context.Context, sctx sessionctx.Context, node *resolve
 		// plan is predetermined (no secondary indexes, no TiFlash, no predicates).
 		// This skips logical optimization, stats loading, and cost estimation.
 		if tp, tpNames := core.TryTrivialPlan(pctx, node); tp != nil {
+			sessVars.FoundInTrivialPlan = true
 			return tp, tpNames, nil
 		}
 	}

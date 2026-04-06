@@ -261,9 +261,24 @@ func optimizeNoCache(ctx context.Context, sctx sessionctx.Context, node *resolve
 		// Try the trivial plan fast path for simple full-table scans where the
 		// plan is predetermined (no secondary indexes, no TiFlash, no predicates).
 		// This skips logical optimization, stats loading, and cost estimation.
+		// Skip the fast path if a binding matches: the normal path must run so
+		// that FoundInBinding is set and any binding hints are applied.
 		if tp, tpNames := core.TryTrivialPlan(pctx, node); tp != nil {
-			sessVars.FoundInTrivialPlan = true
-			return tp, tpNames, nil
+			trivialBindingMatch := false
+			if sessVars.UsePlanBaselines {
+				if sn, ok := node.Node.(ast.StmtNode); ok {
+					if _, m, _ := bindinfo.MatchSQLBinding(sctx, sn); m {
+						trivialBindingMatch = true
+					}
+				}
+			}
+			if !trivialBindingMatch {
+				if err := core.CheckTableMode(node); err != nil {
+					return nil, nil, err
+				}
+				sessVars.FoundInTrivialPlan = true
+				return tp, tpNames, nil
+			}
 		}
 	}
 

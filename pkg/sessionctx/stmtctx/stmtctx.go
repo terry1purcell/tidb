@@ -482,6 +482,11 @@ type StatementContext struct {
 	// logical build round produced an order-aware join reorder candidate that is
 	// worth exploring in a dedicated alternative round.
 	AlternativeLogicalPlanOrderAwareJoinReorder bool
+	// AlternativeLogicalPlanFTSLikeFallback is a mode flag set before the
+	// first build round when alternative logical plans are enabled. When true,
+	// the expression rewriter converts MATCH...AGAINST to LIKE predicates
+	// instead of the native FTSMysqlMatchAgainst builtin.
+	AlternativeLogicalPlanFTSLikeFallback bool
 
 	// IsExplainAnalyzeDML is true if the statement is "explain analyze DML executors", before responding the explain
 	// results to the client, the transaction should be committed first. See issue #37373 for more details.
@@ -662,6 +667,7 @@ func (sc *StatementContext) ResetAlternativeLogicalPlanSignals() {
 	sc.AlternativeLogicalPlanDecorrelatedApply = false
 	sc.AlternativeLogicalPlanSameOrderIndexJoin = false
 	sc.AlternativeLogicalPlanOrderAwareJoinReorder = false
+	sc.AlternativeLogicalPlanFTSLikeFallback = false
 }
 
 // MarkAlternativeLogicalPlanDecorrelatedApply records that at least one Apply has

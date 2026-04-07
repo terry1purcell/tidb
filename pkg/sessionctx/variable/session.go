@@ -1068,9 +1068,6 @@ type SessionVars struct {
 
 	// EnableCorrelationAdjustment is used to indicate if correlation adjustment is enabled.
 	EnableCorrelationAdjustment bool
-	// FulltextSearchFallback controls the behavior when MATCH...AGAINST syntax is used.
-	// Options: 'like' (convert to LIKE predicates), 'error' (throw error if no fulltext index).
-	FulltextSearchFallback string
 
 	// CorrelationExpFactor is used to control the heuristic approach of row count estimation when CorrelationThreshold is not met.
 	CorrelationExpFactor int
@@ -2353,7 +2350,6 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		allowInSubqToJoinAndAgg:          vardef.DefOptInSubqToJoinAndAgg,
 		preferRangeScan:                  vardef.DefOptPreferRangeScan,
 		EnableCorrelationAdjustment:      vardef.DefOptEnableCorrelationAdjustment,
-		FulltextSearchFallback:           vardef.DefOptFulltextSearchFallback,
 		LimitPushDownThreshold:           vardef.DefOptLimitPushDownThreshold,
 		CorrelationThreshold:             vardef.DefOptCorrelationThreshold,
 		CorrelationExpFactor:             vardef.DefOptCorrelationExpFactor,

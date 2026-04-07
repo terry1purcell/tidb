@@ -1,5 +1,5 @@
 set tidb_cost_model_version=1;
-set @@tidb_opt_fulltext_search_fallback='like';
+set @@tidb_opt_enable_alternative_logical_plans=ON;
 drop table if exists articles;
 create table articles (id int primary key, title varchar(200), body text);
 insert into articles values
@@ -45,10 +45,10 @@ select id, title from articles where match(title) against('tutorial security' in
 id	title
 select id, title from articles where match(title) against('');
 id	title
-set @@tidb_opt_fulltext_search_fallback='error';
+set @@tidb_opt_enable_alternative_logical_plans=OFF;
 select id, title from articles where match(title) against('MySQL');
-Error 1235 (42000): This version of TiDB doesn't yet support 'MATCH...AGAINST (fulltext search not supported, set tidb_opt_fulltext_search_fallback='like' to use LIKE fallback)'
-set @@tidb_opt_fulltext_search_fallback='like';
+Error 1105 (HY000): cannot use 'MATCH ... AGAINST' outside of fulltext index
+set @@tidb_opt_enable_alternative_logical_plans=ON;
 select id, title from articles where match(title) against('MySQL');
 id	title
 1	MySQL Tutorial
@@ -129,4 +129,5 @@ id	title
 select id, title from articles where match(title) against('+MySQL +"How To" -PostgreSQL' in boolean mode);
 id	title
 2	How To Use MySQL Well
+set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

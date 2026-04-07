@@ -450,7 +450,7 @@ func scalarExprSupportedByFlash(ctx EvalContext, function *ScalarFunction) bool 
 		return true
 	case ast.VecDims, ast.VecL1Distance, ast.VecL2Distance, ast.VecNegativeInnerProduct, ast.VecCosineDistance, ast.VecL2Norm, ast.VecAsText:
 		return true
-	case ast.FTSMatchWord:
+	case ast.FTSMatchWord, ast.FTSMysqlMatchAgainst:
 		return true
 	case ast.Grouping: // grouping function for grouping sets identification.
 		return true

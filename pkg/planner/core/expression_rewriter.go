@@ -2305,41 +2305,67 @@ func (er *expressionRewriter) patternLikeOrIlikeToExpression(v *ast.PatternLikeO
 }
 
 func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
-	// TODO: Check if a fulltext index exists for the given columns.
-	// This is currently not implemented because:
-	// 1. Column expressions at this point in rewriting don't have easy access to table metadata
-	// 2. Native fulltext search via MATCH...AGAINST is not yet supported in TiDB
-	// 3. Fulltext indexes in TiDB/TiFlash are used via fts_match_word() function, not MATCH...AGAINST
-	// When native MATCH...AGAINST support is added, we should error here if a fulltext index exists.
-
-	// Check fallback mode
-	var fallbackMode string
-	if er.planCtx != nil && er.planCtx.builder != nil && er.planCtx.builder.ctx != nil {
-		fallbackMode = er.planCtx.builder.ctx.GetSessionVars().FulltextSearchFallback
-	} else {
-		fallbackMode = "like" // default
-	}
-
-	if fallbackMode == "error" {
-		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST (fulltext search not supported, set tidb_opt_fulltext_search_fallback='like' to use LIKE fallback)")
-		return
-	}
-
-	// Fallback mode is "like" - convert to LIKE predicates
 	// Both the column expressions and Against expression have been visited
 	// and pushed onto the ctxStack. The stack layout is:
 	// [..., col1, col2, ..., colN, against]
-	numColumns := len(v.ColumnNames)
-	l := len(er.ctxStack)
-	if l < numColumns+1 {
-		er.err = errors.Errorf("MATCH...AGAINST: expected %d column expressions and Against expression on stack, got %d", numColumns+1, l)
+	numCols := len(v.ColumnNames)
+	stackLen := len(er.ctxStack)
+	if stackLen < numCols+1 {
+		er.err = errors.Errorf("Unexpected stack length for MatchAgainst: %d", stackLen)
 		return
 	}
 
-	// The Against expression is the last one on the stack
-	againstExpr := er.ctxStack[l-1]
+	// When alternative logical plans are enabled, convert MATCH...AGAINST to
+	// LIKE predicates as a fallback that always works without TiFlash. When
+	// disabled, convert to the native FTSMysqlMatchAgainst builtin which can
+	// be pushed down to TiFlash for execution against fulltext indexes.
+	useLikeFallback := false
+	if er.planCtx != nil && er.planCtx.builder != nil && er.planCtx.builder.ctx != nil {
+		sessVars := er.planCtx.builder.ctx.GetSessionVars()
+		useLikeFallback = sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback
+	}
 
-	// Check if it's a constant string
+	if useLikeFallback {
+		er.matchAgainstToLike(v, numCols, stackLen)
+	} else {
+		er.matchAgainstToBuiltin(v, numCols, stackLen)
+	}
+}
+
+// matchAgainstToBuiltin converts MATCH...AGAINST to the FTSMysqlMatchAgainst
+// builtin scalar function which can be pushed down to TiFlash for execution
+// against a fulltext index.
+func (er *expressionRewriter) matchAgainstToBuiltin(v *ast.MatchAgainst, numCols, stackLen int) {
+	against := er.ctxStack[stackLen-1]
+	cols := er.ctxStack[stackLen-numCols-1 : stackLen-1]
+
+	args := make([]expression.Expression, 0, 1+numCols)
+	args = append(args, against)
+	args = append(args, cols...)
+
+	er.ctxStackPop(numCols + 1)
+	fn, err := er.newFunction(ast.FTSMysqlMatchAgainst, &v.Type, args...)
+	if err != nil {
+		er.err = err
+		return
+	}
+	sf, ok := fn.(*expression.ScalarFunction)
+	if !ok {
+		er.err = errors.Errorf("unexpected expression type for %s: %T", ast.FTSMysqlMatchAgainst, fn)
+		return
+	}
+	if err := expression.SetFTSMysqlMatchAgainstModifier(sf, v.Modifier); err != nil {
+		er.err = err
+		return
+	}
+	er.ctxStackAppend(fn, types.EmptyName)
+}
+
+// matchAgainstToLike converts MATCH...AGAINST to LIKE predicates as a
+// fallback when the native FTS pushdown path is not viable.
+func (er *expressionRewriter) matchAgainstToLike(v *ast.MatchAgainst, numCols, stackLen int) {
+	againstExpr := er.ctxStack[stackLen-1]
+
 	constExpr, ok := againstExpr.(*expression.Constant)
 	if !ok {
 		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST with non-constant search string")
@@ -2357,17 +2383,13 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 		return
 	}
 
-	// Get the column expressions from the stack
-	// They're at positions [l-numColumns-1 : l-1]
-	columns := make([]expression.Expression, numColumns)
-	for i := range numColumns {
-		columns[i] = er.ctxStack[l-numColumns-1+i]
+	columns := make([]expression.Expression, numCols)
+	for i := range numCols {
+		columns[i] = er.ctxStack[stackLen-numCols-1+i]
 	}
 
-	// Pop all column expressions and the Against expression
-	er.ctxStackPop(numColumns + 1)
+	er.ctxStackPop(numCols + 1)
 
-	// Convert to LIKE predicates
 	result, err := er.convertMatchAgainstToLike(columns, searchText.GetString(), v.Modifier)
 	if err != nil {
 		er.err = err

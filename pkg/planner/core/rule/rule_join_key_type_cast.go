@@ -71,8 +71,8 @@ type JoinKeyTypeCastRewriter struct{}
 
 // Optimize implements base.LogicalOptRule.
 func (*JoinKeyTypeCastRewriter) Optimize(_ context.Context, p base.LogicalPlan) (base.LogicalPlan, bool, error) {
-	changed := rewriteImplicitCasts(p)
-	return p, changed, nil
+	newP, changed := rewriteJoinTypeCasts(p)
+	return newP, changed, nil
 }
 
 // Name implements base.LogicalOptRule.
@@ -290,6 +290,24 @@ func buildPrefixLikePredicate(sctx base.PlanContext, col *expression.Column, int
 // Join key type cast rewriting
 // ---------------------------------------------------------------------------
 
+// rewriteJoinTypeCasts recursively walks the plan tree.
+func rewriteJoinTypeCasts(p base.LogicalPlan) (base.LogicalPlan, bool) {
+	anyChanged := false
+	for i, child := range p.Children() {
+		newChild, changed := rewriteJoinTypeCasts(child)
+		if changed {
+			p.SetChild(i, newChild)
+			anyChanged = true
+		}
+	}
+	join, ok := p.(*logicalop.LogicalJoin)
+	if !ok {
+		return p, anyChanged
+	}
+	changed := rewriteJoinEqConds(join)
+	return p, anyChanged || changed
+}
+
 // projCastInfo describes a CAST-to-DOUBLE expression in a child Projection.
 type projCastInfo struct {
 	proj    *logicalop.LogicalProjection
@@ -324,11 +342,22 @@ func rewriteJoinEqConds(join *logicalop.LogicalJoin) bool {
 	}
 	guards := map[int]*guardEntry{}
 
+	// Process each EqualCondition.
 	// Determine which child index is the preserved (outer) side, if any.
-	// LEFT JOIN preserves left (child 0); RIGHT JOIN preserves right (child 1).
-	preservedChildIdx := -1 // -1 means no preserved side (inner join)
+	// The preserved side is the one whose rows appear in the output regardless
+	// of whether a match exists. Pushing a guard filter there would incorrectly
+	// remove rows that should survive with NULL-padded (or false-flagged) columns.
+	//
+	// LEFT JOIN / LeftOuterSemiJoin / AntiLeftOuterSemiJoin / AntiSemiJoin:
+	//   left (child 0) is preserved.
+	// RIGHT JOIN: right (child 1) is preserved.
+	// INNER JOIN / SemiJoin: no preserved side (unmatched rows are discarded).
+	preservedChildIdx := -1 // -1 means no preserved side
 	switch join.JoinType {
-	case base.LeftOuterJoin:
+	case base.LeftOuterJoin,
+		base.AntiSemiJoin,
+		base.LeftOuterSemiJoin,
+		base.AntiLeftOuterSemiJoin:
 		preservedChildIdx = 0
 	case base.RightOuterJoin:
 		preservedChildIdx = 1
@@ -445,6 +474,10 @@ func rewriteJoinEqConds(join *logicalop.LogicalJoin) bool {
 		g.proj.SetChildren(sel)
 	}
 
+	// Note: we do NOT call MergeSchema() here. The new columns are only used
+	// internally by EqualConditions as join keys, not by the join's output.
+	// Column pruning (FlagPruneColumnsAgain) runs later and will rebuild
+	// schemas correctly.
 	return anyChanged
 }
 

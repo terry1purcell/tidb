@@ -512,10 +512,30 @@ func TestParallelStreamAggExec(t *testing.T) {
 		tk.MustExec("set @@tidb_streamagg_concurrency = 1")
 		expected := tk.MustQuery(sql).Sort().Rows()
 
-		// Verify parallel path produces identical results.
+		// Verify parallel path produces identical results and actually
+		// exercises the executor-level parallel StreamAgg (not Shuffle).
 		for _, con := range []int{2, 4, 8} {
 			tk.MustExec(fmt.Sprintf("set @@tidb_streamagg_concurrency = %d", con))
 			comment := fmt.Sprintf("sql: %s; concurrency: %d", sql, con)
+
+			// EXPLAIN ANALYZE must show the parallel runtime stats marker
+			// ("agg_worker") and must not show "Shuffle" (which would mean
+			// the planner-level parallelism path, not executor-level).
+			explainRows := tk.MustQuery("explain analyze " + sql).Rows()
+			foundAggWorker := false
+			foundShuffle := false
+			for _, row := range explainRows {
+				line := fmt.Sprintf("%v", row)
+				if strings.Contains(line, "agg_worker") {
+					foundAggWorker = true
+				}
+				if strings.Contains(line, "Shuffle") {
+					foundShuffle = true
+				}
+			}
+			require.True(t, foundAggWorker, "expected parallel StreamAgg runtime stats (agg_worker) in plan; %s", comment)
+			require.False(t, foundShuffle, "expected no Shuffle operator in plan; %s", comment)
+
 			got := tk.MustQuery(sql).Sort().Rows()
 			require.Equal(t, len(expected), len(got), comment)
 			for i := range expected {

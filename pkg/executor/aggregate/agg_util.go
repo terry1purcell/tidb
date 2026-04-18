@@ -274,7 +274,7 @@ func (e *StreamAggRuntimeStats) String() string {
 		totalTaskNum += w.TaskNum
 	}
 	fmt.Fprintf(buf, "agg_worker:{wall_time:%s, concurrency:%d, task_num:%d, tot_wait:%s, tot_exec:%s, tot_time:%s",
-		time.Duration(e.WallTime), e.Concurrency, totalTaskNum, time.Duration(totalWait), time.Duration(totalExec), time.Duration(totalTime))
+		time.Duration(atomic.LoadInt64(&e.WallTime)), e.Concurrency, totalTaskNum, time.Duration(totalWait), time.Duration(totalExec), time.Duration(totalTime))
 	n := len(e.WorkerStats)
 	if n > 0 {
 		slices.SortFunc(e.WorkerStats, func(i, j *AggWorkerStat) int { return cmp.Compare(i.WorkerTime, j.WorkerTime) })

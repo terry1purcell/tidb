@@ -46,9 +46,12 @@ go_library(
 go_test(
     name = "aggregate_test",
     timeout = "short",
-    srcs = ["agg_spill_test.go"],
+    srcs = [
+        "agg_spill_test.go",
+        "agg_stream_parallel_test.go",
+    ],
     flaky = True,
-    shard_count = 3,
+    shard_count = 6,
     deps = [
         ":aggregate",
         "//pkg/config",
@@ -62,6 +65,7 @@ go_test(
         "//pkg/parser/mysql",
         "//pkg/sessionctx",
         "//pkg/sessionctx/vardef",
+        "//pkg/testkit",
         "//pkg/types",
         "//pkg/util/chunk",
         "//pkg/util/memory",

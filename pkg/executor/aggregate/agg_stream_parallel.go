@@ -48,6 +48,8 @@ func (e *StreamAggExec) openParallel() error {
 	e.GroupChecker.Reset()
 	e.executed = false
 	e.IsChildReturnEmpty = true
+	e.started.Store(0)
+	e.drained.Store(0)
 
 	if e.memTracker != nil {
 		e.memTracker.Reset()
@@ -68,6 +70,8 @@ func (e *StreamAggExec) openParallel() error {
 	for range e.Concurrency {
 		e.freeChkCh <- exec.NewFirstChunk(e)
 	}
+
+	e.initParallelStats()
 	return nil
 }
 
@@ -126,6 +130,7 @@ func (e *StreamAggExec) closeParallel() error {
 		}
 		e.notifyWg.Wait()
 		e.started.Store(0)
+		e.drainPendingGroupTasks()
 	}
 
 	if e.RuntimeStats() != nil {
@@ -137,6 +142,26 @@ func (e *StreamAggExec) closeParallel() error {
 
 	e.GroupChecker.Reset()
 	return e.BaseExecutor.Close()
+}
+
+// drainPendingGroupTasks releases memory for any group tasks still queued
+// in groupCh after workers have been stopped. This prevents memory leaks
+// when closeParallel fires before all dispatched groups are consumed
+// (e.g., LIMIT queries).
+func (e *StreamAggExec) drainPendingGroupTasks() {
+	for {
+		select {
+		case task, ok := <-e.groupCh:
+			if !ok {
+				return
+			}
+			if task.chk != nil {
+				e.memTracker.Consume(-task.chk.MemoryUsage())
+			}
+		default:
+			return
+		}
+	}
 }
 
 // groupSplitter reads sorted input from the child executor, identifies
@@ -155,16 +180,15 @@ func (e *StreamAggExec) groupSplitter(ctx context.Context) {
 	accChk := chunk.New(childTypes, 0, e.MaxChunkSize())
 	e.memTracker.Consume(accChk.MemoryUsage())
 
-	stats := e.initParallelStats()
 	var workerStart time.Time
-	if stats != nil {
+	if e.stats != nil {
 		workerStart = time.Now()
 	}
 
 	defer func() {
 		e.memTracker.Consume(-childResult.MemoryUsage() - accChk.MemoryUsage())
-		if stats != nil {
-			atomic.AddInt64(&stats.WallTime, int64(time.Since(workerStart)))
+		if e.stats != nil {
+			atomic.AddInt64(&e.stats.WallTime, int64(time.Since(workerStart)))
 		}
 	}()
 
@@ -372,22 +396,32 @@ func (e *StreamAggExec) reorderWorker(ctx context.Context) {
 }
 
 // handleWorkerPanic recovers from panics in worker goroutines.
+// It calls wg.Done() before attempting error delivery so that
+// closeParallel (which waits on the waitgroup) is never blocked
+// by a full resultChkCh.
 func (e *StreamAggExec) handleWorkerPanic(ctx context.Context, wg *sync.WaitGroup) {
-	if r := recover(); r != nil {
-		err := util.GetRecoverError(r)
-		logutil.Logger(ctx).Error("parallel stream agg worker panicked", zap.Error(err), zap.Stack("stack"))
-		e.resultChkCh <- streamAggOutput{err: err}
-	}
+	r := recover()
 	if wg != nil {
 		wg.Done()
+	}
+	if r != nil {
+		err := util.GetRecoverError(r)
+		logutil.Logger(ctx).Error("parallel stream agg worker panicked", zap.Error(err), zap.Stack("stack"))
+		select {
+		case e.resultChkCh <- streamAggOutput{err: err}:
+		default:
+			logutil.Logger(ctx).Warn("parallel stream agg: recovered error dropped, resultChkCh full", zap.Error(err))
+		}
 	}
 }
 
 // initParallelStats sets up runtime stats tracking for parallel execution.
-// Returns nil if runtime stats collection is not enabled.
-func (e *StreamAggExec) initParallelStats() *StreamAggRuntimeStats {
+// Must be called from openParallel (before goroutines start) so that
+// e.stats is a stable pointer readable by all workers without races.
+func (e *StreamAggExec) initParallelStats() {
 	if e.RuntimeStats() == nil {
-		return nil
+		e.stats = nil
+		return
 	}
 	stats := &StreamAggRuntimeStats{
 		Concurrency: e.Concurrency,
@@ -397,5 +431,4 @@ func (e *StreamAggExec) initParallelStats() *StreamAggRuntimeStats {
 		stats.WorkerStats[i] = &AggWorkerStat{}
 	}
 	e.stats = stats
-	return stats
 }

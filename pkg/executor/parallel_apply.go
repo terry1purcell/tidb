@@ -410,6 +410,13 @@ func (e *ParallelNestedLoopApplyExec) innerWorkerOrdered(ctx context.Context, id
 		})
 		chks, err := e.processOneOuterRow(ctx, id, or)
 		if err != nil {
+			// If the executor is shutting down, the error is from
+			// deliberate context cancellation — not a real failure.
+			select {
+			case <-e.exit:
+				return
+			default:
+			}
 			select {
 			case e.orderedResultCh <- reorder.SeqResult[orderedApplyResult]{Seq: or.seq, Err: err}:
 			case <-e.exit:

@@ -1,0 +1,9 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "reorder",
+    srcs = ["reorder.go"],
+    importpath = "github.com/pingcap/tidb/pkg/executor/internal/reorder",
+    visibility = ["//pkg/executor:__subpackages__"],
+    deps = ["//pkg/util/chunk"],
+)

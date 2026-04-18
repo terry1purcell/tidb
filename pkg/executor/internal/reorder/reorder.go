@@ -34,9 +34,9 @@ import (
 // T is the domain-specific payload (e.g., []*chunk.Chunk for apply,
 // *chunk.Chunk for stream agg).
 type SeqResult[T any] struct {
-	Seq uint64
 	Val T
 	Err error
+	Seq uint64
 }
 
 // AppendRow appends a single row to the output stream. It handles flushing

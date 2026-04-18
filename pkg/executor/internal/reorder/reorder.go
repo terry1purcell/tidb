@@ -22,11 +22,22 @@
 // reorder worker drains results in strict sequence order, batching rows
 // into output chunks for the consumer.
 //
+// # Sequence invariant
+//
+// Sequence numbers MUST be zero-based, contiguous (incrementing by 1), and
+// unique. The producer assigns seq=0, 1, 2, … to each work item before
+// dispatching it. Run tracks a nextSeq counter starting at 0 and advances
+// it by 1 each time the corresponding result is emitted. Any violation —
+// a duplicate, a seq below nextSeq, or a gap when inputCh is closed — is
+// treated as a bug in the caller and reported as an error via sendResult.
+//
 // This package is used by ParallelNestedLoopApplyExec and parallel
 // StreamAggExec to share the reorder logic rather than duplicating it.
 package reorder
 
 import (
+	"fmt"
+
 	"github.com/pingcap/tidb/pkg/util/chunk"
 )
 
@@ -58,9 +69,12 @@ type RowEmitter[T any] func(appendRow AppendRow, val T) bool
 type SendChunk func(chk *chunk.Chunk, err error) bool
 
 // Run executes the reorder worker loop. It collects out-of-order results
-// from inputCh, buffers them in a pending map, and emits rows in strict
-// sequence order via the emitRows callback. Output is batched into chunks
-// from freeChkCh and delivered via sendResult.
+// from inputCh, buffers them in a pending map keyed by sequence number,
+// and emits rows in strict sequence order via the emitRows callback.
+// Output is batched into chunks from freeChkCh and delivered via sendResult.
+//
+// Sequence numbers must satisfy the invariant documented at the package
+// level: zero-based, contiguous, unique. Violations are reported as errors.
 //
 // Backpressure: the caller should provide a paceCh where the producer
 // acquires a token before dispatching each work item. Run releases one
@@ -69,6 +83,8 @@ type SendChunk func(chk *chunk.Chunk, err error) bool
 // Shutdown: closing the exit channel causes Run to return promptly.
 // Closing inputCh signals that all workers are done; Run drains any
 // remaining buffered results and sends an EOF (sendResult with nil chunk).
+// If pending results remain after inputCh is closed (indicating a gap in
+// the sequence), Run reports an error instead of a clean EOF.
 func Run[T any](
 	inputCh <-chan SeqResult[T],
 	emitRows RowEmitter[T],
@@ -77,6 +93,10 @@ func Run[T any](
 	paceCh <-chan struct{},
 	exit <-chan struct{},
 ) {
+	// pending holds out-of-order results waiting for earlier sequences.
+	// nextSeq is the next sequence number expected for in-order emission.
+	// Both are governed by the sequence invariant: seq numbers are
+	// zero-based, contiguous, and unique.
 	pending := make(map[uint64]SeqResult[T])
 	nextSeq := uint64(0)
 
@@ -119,19 +139,45 @@ func Run[T any](
 		return exited
 	}
 
+	// validateSeq checks the sequence invariant for an incoming result.
+	// Returns a non-nil error if the sequence is invalid.
+	validateSeq := func(seq uint64) error {
+		if seq < nextSeq {
+			return fmt.Errorf("reorder: received seq %d which is below nextSeq %d (already emitted)", seq, nextSeq)
+		}
+		if _, dup := pending[seq]; dup {
+			return fmt.Errorf("reorder: received duplicate seq %d", seq)
+		}
+		return nil
+	}
+
+	// finishWithPendingCheck flushes the output chunk and sends EOF if
+	// pending is empty, or sends an error if there are gaps.
+	finishWithPendingCheck := func() {
+		if len(pending) > 0 {
+			sendResult(nil, fmt.Errorf("reorder: input closed with %d pending results; nextSeq=%d (sequence gap)", len(pending), nextSeq))
+			return
+		}
+		if outputChk.NumRows() > 0 {
+			sendResult(outputChk, nil)
+		}
+		sendResult(nil, nil) // EOF
+	}
+
 	for {
 		select {
 		case r, ok := <-inputCh:
 			if !ok {
-				// Channel closed – all workers done. Flush remaining rows.
-				if outputChk.NumRows() > 0 {
-					sendResult(outputChk, nil)
-				}
-				sendResult(nil, nil) // signal EOF
+				// Channel closed – all workers done.
+				finishWithPendingCheck()
 				return
 			}
 			if r.Err != nil {
 				sendResult(nil, r.Err)
+				return
+			}
+			if err := validateSeq(r.Seq); err != nil {
+				sendResult(nil, err)
 				return
 			}
 			pending[r.Seq] = r
@@ -149,7 +195,11 @@ func Run[T any](
 					}
 					delete(pending, nextSeq)
 					nextSeq++
-					<-paceCh
+					select {
+					case <-paceCh:
+					case <-exit:
+						return
+					}
 
 					if emitRows(appendRow, pr.Val) {
 						return
@@ -167,12 +217,15 @@ func Run[T any](
 				select {
 				case next, ok2 := <-inputCh:
 					if !ok2 {
-						sendResult(outputChk, nil)
-						sendResult(nil, nil)
+						finishWithPendingCheck()
 						return
 					}
 					if next.Err != nil {
 						sendResult(nil, next.Err)
+						return
+					}
+					if err := validateSeq(next.Seq); err != nil {
+						sendResult(nil, err)
 						return
 					}
 					pending[next.Seq] = next

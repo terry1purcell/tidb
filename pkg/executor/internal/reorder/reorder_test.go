@@ -279,3 +279,138 @@ func TestRunEmptyInput(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, rows)
 }
+
+// TestRunDuplicateSeq verifies that a duplicate sequence number is reported
+// as an error.
+func TestRunDuplicateSeq(t *testing.T) {
+	inputCh := make(chan SeqResult[*chunk.Chunk], 5)
+	resultCh := make(chan resultMsg, 5)
+	freeChkCh := make(chan *chunk.Chunk, 2)
+	paceCh := make(chan struct{}, 10)
+	exit := make(chan struct{})
+
+	ft := types.NewFieldType(mysql.TypeLonglong)
+	for range 2 {
+		freeChkCh <- chunk.New([]*types.FieldType{ft}, 0, 8)
+	}
+	for range 3 {
+		paceCh <- struct{}{}
+	}
+
+	// Send seq 1 twice (duplicate) — seq 0 hasn't arrived yet so both
+	// are buffered in pending.
+	inputCh <- SeqResult[*chunk.Chunk]{Seq: 1, Val: newIntChunk(10)}
+	inputCh <- SeqResult[*chunk.Chunk]{Seq: 1, Val: newIntChunk(10)} // dup
+	close(inputCh)
+
+	emitRows := func(appendRow AppendRow, val *chunk.Chunk) bool {
+		return false
+	}
+	sendResult := func(chk *chunk.Chunk, err error) bool {
+		resultCh <- resultMsg{chk: chk, err: err}
+		return false
+	}
+
+	go func() {
+		Run(inputCh, emitRows, sendResult, freeChkCh, paceCh, exit)
+		close(resultCh)
+	}()
+
+	_, err := collectOutput(resultCh)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "duplicate seq")
+}
+
+// TestRunSeqBelowNextSeq verifies that a sequence number already emitted
+// is reported as an error.
+func TestRunSeqBelowNextSeq(t *testing.T) {
+	inputCh := make(chan SeqResult[*chunk.Chunk], 5)
+	resultCh := make(chan resultMsg, 5)
+	freeChkCh := make(chan *chunk.Chunk, 2)
+	paceCh := make(chan struct{}, 10)
+	exit := make(chan struct{})
+
+	ft := types.NewFieldType(mysql.TypeLonglong)
+	for range 2 {
+		freeChkCh <- chunk.New([]*types.FieldType{ft}, 0, 8)
+	}
+	for range 3 {
+		paceCh <- struct{}{}
+	}
+
+	// Send seq 0, then seq 0 again after it's been consumed.
+	inputCh <- SeqResult[*chunk.Chunk]{Seq: 0, Val: newIntChunk(0)}
+	inputCh <- SeqResult[*chunk.Chunk]{Seq: 0, Val: newIntChunk(0)} // below nextSeq
+	close(inputCh)
+
+	emitRows := func(appendRow AppendRow, val *chunk.Chunk) bool {
+		if val != nil {
+			for i := range val.NumRows() {
+				if appendRow(val.GetRow(i)) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	sendResult := func(chk *chunk.Chunk, err error) bool {
+		resultCh <- resultMsg{chk: chk, err: err}
+		return false
+	}
+
+	go func() {
+		Run(inputCh, emitRows, sendResult, freeChkCh, paceCh, exit)
+		close(resultCh)
+	}()
+
+	_, err := collectOutput(resultCh)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "below nextSeq")
+}
+
+// TestRunSequenceGapOnClose verifies that if inputCh is closed while
+// there are pending results (a gap in the sequence), Run reports an error.
+func TestRunSequenceGapOnClose(t *testing.T) {
+	inputCh := make(chan SeqResult[*chunk.Chunk], 5)
+	resultCh := make(chan resultMsg, 5)
+	freeChkCh := make(chan *chunk.Chunk, 2)
+	paceCh := make(chan struct{}, 10)
+	exit := make(chan struct{})
+
+	ft := types.NewFieldType(mysql.TypeLonglong)
+	for range 2 {
+		freeChkCh <- chunk.New([]*types.FieldType{ft}, 0, 8)
+	}
+	for range 2 {
+		paceCh <- struct{}{}
+	}
+
+	// Send seq 0 and seq 2 but never seq 1 — creates a gap.
+	inputCh <- SeqResult[*chunk.Chunk]{Seq: 0, Val: newIntChunk(0)}
+	inputCh <- SeqResult[*chunk.Chunk]{Seq: 2, Val: newIntChunk(20)}
+	close(inputCh)
+
+	emitRows := func(appendRow AppendRow, val *chunk.Chunk) bool {
+		if val != nil {
+			for i := range val.NumRows() {
+				if appendRow(val.GetRow(i)) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	sendResult := func(chk *chunk.Chunk, err error) bool {
+		resultCh <- resultMsg{chk: chk, err: err}
+		return false
+	}
+
+	go func() {
+		Run(inputCh, emitRows, sendResult, freeChkCh, paceCh, exit)
+		close(resultCh)
+	}()
+
+	_, err := collectOutput(resultCh)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sequence gap")
+}

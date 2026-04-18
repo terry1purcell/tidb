@@ -32,9 +32,9 @@ import (
 
 // streamAggGroupTask represents a complete group dispatched to an aggregate worker.
 type streamAggGroupTask struct {
-	seq  uint64        // monotonic sequence for reordering
-	rows []chunk.Row   // copied rows belonging to this group
-	chk  *chunk.Chunk  // the chunk owning the copied rows (for memory tracking)
+	seq  uint64       // monotonic sequence for reordering
+	rows []chunk.Row  // copied rows belonging to this group
+	chk  *chunk.Chunk // the chunk owning the copied rows (for memory tracking)
 }
 
 // streamAggOutput carries a result chunk from the reorder worker to Next().

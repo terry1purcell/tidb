@@ -820,9 +820,9 @@
       {
         "SQL": "explain format = 'plan_tree' select /*+ qb_name(qb_v9, v9), AGG_TO_COP(@qb_v9) */ * from v9;",
         "Plan": [
-          "HashAgg root  funcs:sum(Column)->Column",
-          "└─IndexReader root  index:HashAgg",
-          "  └─HashAgg cop[tikv]  funcs:sum(test.t.a)->Column",
+          "StreamAgg root  funcs:sum(Column)->Column",
+          "└─IndexReader root  index:StreamAgg",
+          "  └─StreamAgg cop[tikv]  funcs:sum(test.t.a)->Column",
           "    └─IndexFullScan cop[tikv] table:t, index:idx_a(a) keep order:false, stats:pseudo"
         ],
         "Warn": null
@@ -1767,9 +1767,9 @@
       {
         "SQL": "explain format = 'plan_tree' select /*+ read_from_storage(tikv[t], tiflash[t]) */ avg(a) from t",
         "Plan": [
-          "HashAgg root  funcs:avg(Column, Column)->Column",
-          "└─IndexReader root  index:HashAgg",
-          "  └─HashAgg cop[tikv]  funcs:count(test.t.a)->Column, funcs:sum(test.t.a)->Column",
+          "StreamAgg root  funcs:avg(Column, Column)->Column",
+          "└─IndexReader root  index:StreamAgg",
+          "  └─StreamAgg cop[tikv]  funcs:count(test.t.a)->Column, funcs:sum(test.t.a)->Column",
           "    └─IndexFullScan cop[tikv] table:t, index:ia(a) keep order:false, stats:pseudo"
         ],
         "Warn": [
@@ -1779,9 +1779,9 @@
       {
         "SQL": "explain format = 'plan_tree' select /*+ read_from_storage(tikv[t]) */ avg(a) from t",
         "Plan": [
-          "HashAgg root  funcs:avg(Column, Column)->Column",
-          "└─IndexReader root  index:HashAgg",
-          "  └─HashAgg cop[tikv]  funcs:count(test.t.a)->Column, funcs:sum(test.t.a)->Column",
+          "StreamAgg root  funcs:avg(Column, Column)->Column",
+          "└─IndexReader root  index:StreamAgg",
+          "  └─StreamAgg cop[tikv]  funcs:count(test.t.a)->Column, funcs:sum(test.t.a)->Column",
           "    └─IndexFullScan cop[tikv] table:t, index:ia(a) keep order:false, stats:pseudo"
         ],
         "Warn": null
@@ -1789,9 +1789,9 @@
       {
         "SQL": "explain format = 'plan_tree' select /*+ read_from_storage(tiflash[t]) */ avg(a) from t",
         "Plan": [
-          "HashAgg root  funcs:avg(Column, Column)->Column",
-          "└─IndexReader root  index:HashAgg",
-          "  └─HashAgg cop[tikv]  funcs:count(test.t.a)->Column, funcs:sum(test.t.a)->Column",
+          "StreamAgg root  funcs:avg(Column, Column)->Column",
+          "└─IndexReader root  index:StreamAgg",
+          "  └─StreamAgg cop[tikv]  funcs:count(test.t.a)->Column, funcs:sum(test.t.a)->Column",
           "    └─IndexFullScan cop[tikv] table:t, index:ia(a) keep order:false, stats:pseudo"
         ],
         "Warn": [

@@ -619,8 +619,21 @@ func getPlanCostVer24PhysicalStreamAgg(pp base.PhysicalPlan, taskType property.T
 	return p.PlanCostVer2, nil
 }
 
-// getPlanCostVer24PhysicalHashAgg returns the plan-cost of this sub-plan, which is:
-// plan-cost = child-cost + (agg-cost + group-cost + hash-build-cost + hash-probe-cost) / concurrency
+// getPlanCostVer24PhysicalHashAgg returns the plan-cost of this sub-plan.
+//
+// For TiDB root and TiKV cop tasks:
+//
+//	plan-cost = child-cost + agg-cost + group-cost + (hash-build-cost + hash-probe-cost) / concurrency
+//
+// Aggregation and grouping represent the same total CPU work regardless of thread-level
+// parallelism (each row is processed once), so they sit outside the concurrency division.
+// Only the hash table operations (build + probe) benefit from parallel execution.
+// This matches the hash join pattern where build-side work is placed outside /concurrency.
+//
+// For TiFlash MPP tasks, data is truly partitioned across nodes so each node handles a
+// disjoint subset of rows. All costs are divided by the MPP concurrency:
+//
+//	plan-cost = child-cost + (agg-cost + group-cost + hash-build-cost + hash-probe-cost) / mppConcurrency
 func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.TaskType, option *costusage.PlanCostOption, isChildOfINL ...bool) (costusage.CostVer2, error) {
 	p := pp.(*physicalop.PhysicalHashAgg)
 	if p.PlanCostInit && !hasCostFlag(option.CostFlag, costusage.CostFlagRecalculate) {
@@ -647,7 +660,21 @@ func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.Tas
 		return costusage.ZeroCostVer2, err
 	}
 
-	p.PlanCostVer2 = costusage.SumCostVer2(startCost, childCost, costusage.DivCostVer2(costusage.SumCostVer2(aggCost, groupCost, hashBuildCost, hashProbeCost), concurrency))
+	if taskType == property.MppTaskType {
+		// MPP partitions data across TiFlash nodes: each node processes a disjoint shard,
+		// so all costs scale with concurrency. Preserve the original formula to avoid
+		// disrupting MPP plan choices calibrated against TiFlash's distributed execution model.
+		p.PlanCostVer2 = costusage.SumCostVer2(startCost, childCost,
+			costusage.DivCostVer2(costusage.SumCostVer2(aggCost, groupCost, hashBuildCost, hashProbeCost), concurrency))
+	} else {
+		// Root (TiDB) and cop (TiKV) tasks: threads share the same input so aggregation
+		// work is not reduced by concurrency — each row is still processed once regardless
+		// of how many workers run in parallel. Only hash table operations benefit from
+		// parallel execution. This matches the hash join pattern where build-side work
+		// (including aggregation) sits outside /concurrency.
+		p.PlanCostVer2 = costusage.SumCostVer2(startCost, childCost, aggCost, groupCost,
+			costusage.DivCostVer2(costusage.SumCostVer2(hashBuildCost, hashProbeCost), concurrency))
+	}
 	p.PlanCostInit = true
 	// Multiply by cost factor - defaults to 1, but can be increased/decreased to influence the cost model
 	p.PlanCostVer2 = costusage.MulCostVer2(p.PlanCostVer2, p.SCtx().GetSessionVars().HashAggCostFactor)

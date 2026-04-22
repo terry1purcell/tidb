@@ -103,6 +103,42 @@ func TestNormalize(t *testing.T) {
 		require.Equal(t, normalized, normalized2)
 		require.Equalf(t, digest.String(), digest2.String(), "%+v", test)
 	}
+
+	const normalizedParenthesizedBinding = "select `pid` from `t` where `id` = ? and ( `ptype` = ? or `ptype` = ? ) order by `pid` limit ?"
+	parenthesizedBindingQueries := []string{
+		"select pid from t where id=1 and (ptype=1 or ptype=2) order by pid limit 10",
+		"select pid from t where id=1 and ((ptype=1) or ptype=2) order by pid limit 10",
+		"select pid from t where id=1 and (ptype=1 or (ptype=2)) order by pid limit 10",
+		"select pid from t where id=1 and ((ptype=1) or (ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1) and (ptype=1 or ptype=2) order by pid limit 10",
+		"select pid from t where (id=1) and ((ptype=1) or ptype=2) order by pid limit 10",
+		"select pid from t where (id=1) and (ptype=1 or (ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1) and ((ptype=1) or (ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1 and (ptype=1 or ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1 and ((ptype=1) or ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1 and (ptype=1 or (ptype=2))) order by pid limit 10",
+		"select pid from t where (id=1 and ((ptype=1) or (ptype=2))) order by pid limit 10",
+		"select pid from t where ((id=1) and (ptype=1 or ptype=2)) order by pid limit 10",
+		"select pid from t where ((id=1) and ((ptype=1) or ptype=2)) order by pid limit 10",
+		"select pid from t where ((id=1) and (ptype=1 or (ptype=2))) order by pid limit 10",
+		"select pid from t where ((id=1) and ((ptype=1) or (ptype=2))) order by pid limit 10",
+	}
+	var referenceDigest string
+	for i, sql := range parenthesizedBindingQueries {
+		normalized := parser.NormalizeForBinding(sql, false)
+		digest := parser.DigestNormalized(normalized)
+		require.Equalf(t, normalizedParenthesizedBinding, normalized, "sql %d: %s", i, sql)
+
+		normalized2, digest2 := parser.NormalizeDigestForBinding(sql)
+		require.Equalf(t, normalized, normalized2, "sql %d: %s", i, sql)
+		require.Equalf(t, digest.String(), digest2.String(), "sql %d: %s", i, sql)
+
+		if i == 0 {
+			referenceDigest = digest.String()
+			continue
+		}
+		require.Equalf(t, referenceDigest, digest.String(), "sql %d: %s", i, sql)
+	}
 }
 
 func TestNormalizeRedact(t *testing.T) {

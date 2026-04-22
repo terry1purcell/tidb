@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/meta/metadef"
 	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -1837,46 +1838,117 @@ func TestBindInfoUniqueIndex(t *testing.T) {
 		t.Skip("Skip this case because there is no upgrade in the first release of next-gen kernel")
 	}
 
-	ctx := context.Background()
-	store, dom := CreateStoreAndBootstrap(t)
-	defer func() { require.NoError(t, store.Close()) }()
+	t.Run("add unique index after clearing duplicated digests", func(t *testing.T) {
+		ctx := context.Background()
+		store, dom := CreateStoreAndBootstrap(t)
+		defer func() { require.NoError(t, store.Close()) }()
 
-	// bootstrap as version245
-	ver245 := version245
-	seV245 := CreateSessionAndSetID(t, store)
-	txn, err := store.Begin()
-	require.NoError(t, err)
-	m := meta.NewMutator(txn)
-	err = m.FinishBootstrap(int64(ver245))
-	require.NoError(t, err)
-	RevertVersionAndVariables(t, seV245, ver245)
-	err = txn.Commit(ctx)
-	require.NoError(t, err)
-	store.SetOption(StoreBootstrappedKey, nil)
+		// bootstrap as version245
+		ver245 := version245
+		seV245 := CreateSessionAndSetID(t, store)
+		txn, err := store.Begin()
+		require.NoError(t, err)
+		m := meta.NewMutator(txn)
+		err = m.FinishBootstrap(int64(ver245))
+		require.NoError(t, err)
+		RevertVersionAndVariables(t, seV245, ver245)
+		err = txn.Commit(ctx)
+		require.NoError(t, err)
+		store.SetOption(StoreBootstrappedKey, nil)
 
-	// remove the unique index on mysql.bind_info for testing
-	MustExec(t, seV245, "alter table mysql.bind_info drop index digest_index")
+		// remove the unique index on mysql.bind_info for testing
+		MustExec(t, seV245, "alter table mysql.bind_info drop index digest_index")
 
-	// insert duplicated values into mysql.bind_info
-	for _, sqlDigest := range []string{"null", "'x'", "'y'"} {
-		for _, planDigest := range []string{"null", "'x'", "'y'"} {
-			insertStmt := fmt.Sprintf(`insert into mysql.bind_info values (
+		// insert duplicated values into mysql.bind_info
+		for _, sqlDigest := range []string{"null", "'x'", "'y'"} {
+			for _, planDigest := range []string{"null", "'x'", "'y'"} {
+				insertStmt := fmt.Sprintf(`insert into mysql.bind_info values (
              "sql", "bind_sql", "db", "disabled", NOW(), NOW(), "", "", "", %s, %s, null)`,
-				sqlDigest, planDigest)
-			MustExec(t, seV245, insertStmt)
-			MustExec(t, seV245, insertStmt)
+					sqlDigest, planDigest)
+				MustExec(t, seV245, insertStmt)
+				MustExec(t, seV245, insertStmt)
+			}
 		}
-	}
 
-	// upgrade to current version
-	dom.Close()
-	domCurVer, err := BootstrapSession(store)
-	require.NoError(t, err)
-	defer domCurVer.Close()
-	seCurVer := CreateSessionAndSetID(t, store)
-	ver, err := GetBootstrapVersion(seCurVer)
-	require.NoError(t, err)
-	require.Equal(t, currentBootstrapVersion, ver)
+		// upgrade to current version
+		dom.Close()
+		domCurVer, err := BootstrapSession(store)
+		require.NoError(t, err)
+		defer domCurVer.Close()
+		seCurVer := CreateSessionAndSetID(t, store)
+		ver, err := GetBootstrapVersion(seCurVer)
+		require.NoError(t, err)
+		require.Equal(t, currentBootstrapVersion, ver)
+	})
+
+	t.Run("rewrite stale binding digests during upgrade", func(t *testing.T) {
+		ctx := context.Background()
+		store, dom := CreateStoreAndBootstrap(t)
+		defer func() { require.NoError(t, store.Close()) }()
+
+		ver258 := version258
+		seV258 := CreateSessionAndSetID(t, store)
+		txn, err := store.Begin()
+		require.NoError(t, err)
+		m := meta.NewMutator(txn)
+		err = m.FinishBootstrap(int64(ver258))
+		require.NoError(t, err)
+		RevertVersionAndVariables(t, seV258, ver258)
+		err = txn.Commit(ctx)
+		require.NoError(t, err)
+		store.SetOption(StoreBootstrappedKey, nil)
+
+		MustExec(t, seV258, "use test")
+		MustExec(t, seV258, "create table t (id int, pid int, ptype int)")
+
+		oldBindSQL := "select pid from t where ((id=1) and ((ptype=1) or (ptype=2))) order by pid limit 10"
+		oldOriginalSQL := "select `pid` from `test` . `t` where ( ( `id` = ? ) and ( ( `ptype` = ? ) or ( `ptype` = ? ) ) ) order by `pid` limit ?"
+		oldDigest := parser.DigestNormalized(oldOriginalSQL).String()
+
+		p := parser.New()
+		stmt, err := p.ParseOneStmt(oldBindSQL, "", "")
+		require.NoError(t, err)
+		expectedOriginalSQL, expectedDigest := bindinfo.NormalizeStmtForBinding(stmt, "test", false)
+		require.NotEqual(t, oldOriginalSQL, expectedOriginalSQL)
+		require.NotEqual(t, oldDigest, expectedDigest)
+
+		MustExec(t, seV258, `INSERT INTO mysql.bind_info(
+original_sql, bind_sql, default_db, status, create_time, update_time, charset, collation, source, sql_digest, plan_digest
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			oldOriginalSQL,
+			oldBindSQL,
+			"test",
+			bindinfo.StatusEnabled,
+			"2024-01-01 00:00:00",
+			"2024-01-02 00:00:00",
+			"utf8mb4",
+			"utf8mb4_bin",
+			bindinfo.SourceManual,
+			oldDigest,
+			nil,
+		)
+
+		dom.Close()
+		domCurVer, err := BootstrapSession(store)
+		require.NoError(t, err)
+		defer domCurVer.Close()
+
+		seCurVer := CreateSessionAndSetID(t, store)
+		ver, err := GetBootstrapVersion(seCurVer)
+		require.NoError(t, err)
+		require.Equal(t, currentBootstrapVersion, ver)
+
+		r := MustExecToRecodeSet(t, seCurVer, "select original_sql, bind_sql, sql_digest from mysql.bind_info where source = 'manual'")
+		req := r.NewChunk(nil)
+		err = r.Next(ctx, req)
+		require.NoError(t, err)
+		require.Equal(t, 1, req.NumRows())
+		row := req.GetRow(0)
+		require.Equal(t, expectedOriginalSQL, row.GetString(0))
+		require.Equal(t, oldBindSQL, row.GetString(1))
+		require.Equal(t, expectedDigest, row.GetString(2))
+		require.NoError(t, r.Close())
+	})
 }
 
 func TestVersionedBootstrapSchemas(t *testing.T) {

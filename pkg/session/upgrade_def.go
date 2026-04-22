@@ -493,6 +493,9 @@ const (
 	// Add the default value management for `tidb_analyze_distsql_scan_concurrency`.
 	// If the cluster is upgraded from a version that has no such variable, we set it to the global.tidb_distsql_scan_concurrency value.
 	version258 = 258
+
+	// version259 rewrites bind_info digests using the current binding normalization rules.
+	version259 = 259
 )
 
 // versionedUpgradeFunction is a struct that holds the upgrade function related
@@ -506,7 +509,7 @@ type versionedUpgradeFunction struct {
 
 // currentBootstrapVersion is defined as a variable, so we can modify its value for testing.
 // please make sure this is the largest version
-var currentBootstrapVersion int64 = version258
+var currentBootstrapVersion int64 = version259
 
 var (
 	// this list must be ordered by version in ascending order, and the function
@@ -689,6 +692,7 @@ var (
 		{version: version256, fn: upgradeToVer256},
 		{version: version257, fn: upgradeToVer257},
 		{version: version258, fn: upgradeToVer258},
+		{version: version259, fn: upgradeToVer259},
 	}
 )
 
@@ -2108,4 +2112,151 @@ func upgradeToVer258(s sessionapi.Session, _ int64) {
 		return
 	}
 	initGlobalVariableIfNotExists(s, vardef.TiDBAnalyzeDistSQLScanConcurrency, rows[0].GetString(0))
+}
+
+type bindingDigestUpgradeInfo struct {
+	rowID        int64
+	originalSQL  string
+	bindSQL      string
+	defaultDB    string
+	status       string
+	createTime   types.Time
+	updateTime   types.Time
+	charset      string
+	collation    string
+	source       string
+	sqlDigest    string
+	planDigest   string
+	lastUsedDate any
+}
+
+func upgradeToVer259(s sessionapi.Session, _ int64) {
+	var err error
+	mustExecute(s, "BEGIN PESSIMISTIC")
+	defer func() {
+		if err != nil {
+			mustExecute(s, "ROLLBACK")
+			return
+		}
+		mustExecute(s, "COMMIT")
+	}()
+
+	mustExecute(s, bindinfo.LockBindInfoSQL)
+
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnBootstrap)
+	rs, err := s.ExecuteInternal(ctx, `SELECT _tidb_rowid, original_sql, bind_sql, default_db, status, create_time, update_time,
+charset, collation, source, sql_digest, plan_digest, last_used_date
+FROM mysql.bind_info
+WHERE source != 'builtin'
+ORDER BY update_time DESC, create_time DESC`)
+	if err != nil {
+		logutil.BgLogger().Fatal("upgradeToVer259 error", zap.Error(err))
+		return
+	}
+
+	req := rs.NewChunk(nil)
+	p := parser.New()
+	seenDigests := make(map[string]struct{})
+	rebuiltBindings := make([]bindingDigestUpgradeInfo, 0, 4)
+	for {
+		err = rs.Next(ctx, req)
+		if err != nil {
+			logutil.BgLogger().Fatal("upgradeToVer259 error", zap.Error(err))
+			return
+		}
+		if req.NumRows() == 0 {
+			break
+		}
+		for i := range req.NumRows() {
+			row := req.GetRow(i)
+			binding := bindingDigestUpgradeInfo{
+				rowID:       row.GetInt64(0),
+				originalSQL: row.GetString(1),
+				bindSQL:     row.GetString(2),
+				defaultDB:   row.GetString(3),
+				status:      row.GetString(4),
+				createTime:  row.GetTime(5),
+				updateTime:  row.GetTime(6),
+				charset:     row.GetString(7),
+				collation:   row.GetString(8),
+				source:      row.GetString(9),
+				sqlDigest:   row.GetString(10),
+				planDigest:  row.GetString(11),
+			}
+			if !row.IsNull(12) {
+				binding.lastUsedDate = row.GetTime(12).String()
+			}
+
+			normalizedSQL, sqlDigest, normalizeErr := normalizeBindingDigestForUpgrade(
+				p,
+				binding.bindSQL,
+				binding.defaultDB,
+				binding.charset,
+				binding.collation,
+			)
+			if normalizeErr != nil {
+				logutil.BgLogger().Warn("skip rewriting binding digest during upgrade",
+					zap.Int64("row_id", binding.rowID),
+					zap.String("bind_sql", binding.bindSQL),
+					zap.Error(normalizeErr))
+			} else {
+				binding.originalSQL = normalizedSQL
+				binding.sqlDigest = sqlDigest
+			}
+
+			key := binding.sqlDigest
+			if key == "" {
+				key = fmt.Sprintf("rowid:%d", binding.rowID)
+			}
+			if _, ok := seenDigests[key]; ok {
+				continue
+			}
+			seenDigests[key] = struct{}{}
+			rebuiltBindings = append(rebuiltBindings, binding)
+		}
+		req.Reset()
+	}
+	if err := rs.Close(); err != nil {
+		logutil.BgLogger().Fatal("upgradeToVer259 error", zap.Error(err))
+	}
+
+	mustExecute(s, "DELETE FROM mysql.bind_info WHERE source != 'builtin'")
+	for _, binding := range rebuiltBindings {
+		var sqlDigest any
+		if binding.sqlDigest != "" {
+			sqlDigest = binding.sqlDigest
+		}
+		var planDigest any
+		if binding.planDigest != "" {
+			planDigest = binding.planDigest
+		}
+		mustExecute(s, `INSERT INTO mysql.bind_info(
+original_sql, bind_sql, default_db, status, create_time, update_time, charset, collation, source, sql_digest, plan_digest, last_used_date
+) VALUES (%?, %?, %?, %?, %?, %?, %?, %?, %?, %?, %?, %?)`,
+			binding.originalSQL,
+			binding.bindSQL,
+			binding.defaultDB,
+			binding.status,
+			binding.createTime.String(),
+			binding.updateTime.String(),
+			binding.charset,
+			binding.collation,
+			binding.source,
+			sqlDigest,
+			planDigest,
+			binding.lastUsedDate,
+		)
+	}
+}
+
+func normalizeBindingDigestForUpgrade(p *parser.Parser, bindSQL, defaultDB, charset, collation string) (normalizedSQL, sqlDigest string, err error) {
+	stmt, err := p.ParseOneStmt(bindSQL, charset, collation)
+	if err != nil {
+		return "", "", err
+	}
+	normalizedSQL, sqlDigest = bindinfo.NormalizeStmtForBinding(stmt, defaultDB, false)
+	if normalizedSQL == "" || sqlDigest == "" {
+		return "", "", fmt.Errorf("failed to normalize binding SQL")
+	}
+	return normalizedSQL, sqlDigest, nil
 }

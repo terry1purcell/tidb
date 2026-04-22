@@ -2114,41 +2114,10 @@ func upgradeToVer258(s sessionapi.Session, _ int64) {
 	initGlobalVariableIfNotExists(s, vardef.TiDBAnalyzeDistSQLScanConcurrency, rows[0].GetString(0))
 }
 
-type bindingDigestUpgradeInfo struct {
-	rowID        int64
-	originalSQL  string
-	bindSQL      string
-	defaultDB    string
-	status       string
-	createTime   types.Time
-	updateTime   types.Time
-	charset      string
-	collation    string
-	source       string
-	sqlDigest    string
-	planDigest   string
-	lastUsedDate any
-}
-
 func upgradeToVer259(s sessionapi.Session, _ int64) {
 	var err error
-	mustExecute(s, "BEGIN PESSIMISTIC")
-	defer func() {
-		if err != nil {
-			mustExecute(s, "ROLLBACK")
-			return
-		}
-		mustExecute(s, "COMMIT")
-	}()
-
-	mustExecute(s, bindinfo.LockBindInfoSQL)
-
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnBootstrap)
-	rs, err := s.ExecuteInternal(ctx, `SELECT _tidb_rowid, original_sql, bind_sql, default_db, status, create_time, update_time,
-charset, collation, source, sql_digest, plan_digest, last_used_date
-FROM mysql.bind_info
-WHERE source != 'builtin'
-ORDER BY update_time DESC, create_time DESC`)
+	rs, err := s.ExecuteInternal(ctx, `SELECT _tidb_rowid, original_sql, bind_sql, default_db, charset, collation, sql_digest FROM mysql.bind_info WHERE source != 'builtin'`)
 	if err != nil {
 		logutil.BgLogger().Fatal("upgradeToVer259 error", zap.Error(err))
 		return
@@ -2156,8 +2125,7 @@ ORDER BY update_time DESC, create_time DESC`)
 
 	req := rs.NewChunk(nil)
 	p := parser.New()
-	seenDigests := make(map[string]struct{})
-	rebuiltBindings := make([]bindingDigestUpgradeInfo, 0, 4)
+	updateRows := make([][]any, 0, 4)
 	for {
 		err = rs.Next(ctx, req)
 		if err != nil {
@@ -2169,83 +2137,45 @@ ORDER BY update_time DESC, create_time DESC`)
 		}
 		for i := range req.NumRows() {
 			row := req.GetRow(i)
-			binding := bindingDigestUpgradeInfo{
-				rowID:       row.GetInt64(0),
-				originalSQL: row.GetString(1),
-				bindSQL:     row.GetString(2),
-				defaultDB:   row.GetString(3),
-				status:      row.GetString(4),
-				createTime:  row.GetTime(5),
-				updateTime:  row.GetTime(6),
-				charset:     row.GetString(7),
-				collation:   row.GetString(8),
-				source:      row.GetString(9),
-				sqlDigest:   row.GetString(10),
-				planDigest:  row.GetString(11),
-			}
-			if !row.IsNull(12) {
-				binding.lastUsedDate = row.GetTime(12).String()
-			}
+			rowID := row.GetInt64(0)
+			oldOriginalSQL := row.GetString(1)
+			originalSQL := oldOriginalSQL
+			bindSQL := row.GetString(2)
+			defaultDB := row.GetString(3)
+			charset := row.GetString(4)
+			collation := row.GetString(5)
+			oldSQLDigest := row.GetString(6)
+			sqlDigest := oldSQLDigest
 
-			normalizedSQL, sqlDigest, normalizeErr := normalizeBindingDigestForUpgrade(
-				p,
-				binding.bindSQL,
-				binding.defaultDB,
-				binding.charset,
-				binding.collation,
-			)
+			normalizedSQL, normalizedDigest, normalizeErr := normalizeBindingDigestForUpgrade(
+				p, bindSQL, defaultDB, charset, collation)
 			if normalizeErr != nil {
 				logutil.BgLogger().Warn("skip rewriting binding digest during upgrade",
-					zap.Int64("row_id", binding.rowID),
-					zap.String("bind_sql", binding.bindSQL),
+					zap.Int64("row_id", rowID),
+					zap.String("bind_sql", bindSQL),
 					zap.Error(normalizeErr))
 			} else {
-				binding.originalSQL = normalizedSQL
-				binding.sqlDigest = sqlDigest
+				originalSQL = normalizedSQL
+				sqlDigest = normalizedDigest
 			}
 
-			key := binding.sqlDigest
-			if key == "" {
-				key = fmt.Sprintf("rowid:%d", binding.rowID)
-			}
-			if _, ok := seenDigests[key]; ok {
+			if originalSQL == oldOriginalSQL && sqlDigest == oldSQLDigest {
 				continue
 			}
-			seenDigests[key] = struct{}{}
-			rebuiltBindings = append(rebuiltBindings, binding)
+			var sqlDigestArg any
+			if sqlDigest != "" {
+				sqlDigestArg = sqlDigest
+			}
+			updateRows = append(updateRows, []any{originalSQL, sqlDigestArg, rowID})
 		}
 		req.Reset()
 	}
 	if err := rs.Close(); err != nil {
 		logutil.BgLogger().Fatal("upgradeToVer259 error", zap.Error(err))
 	}
-
-	mustExecute(s, "DELETE FROM mysql.bind_info WHERE source != 'builtin'")
-	for _, binding := range rebuiltBindings {
-		var sqlDigest any
-		if binding.sqlDigest != "" {
-			sqlDigest = binding.sqlDigest
-		}
-		var planDigest any
-		if binding.planDigest != "" {
-			planDigest = binding.planDigest
-		}
-		mustExecute(s, `INSERT INTO mysql.bind_info(
-original_sql, bind_sql, default_db, status, create_time, update_time, charset, collation, source, sql_digest, plan_digest, last_used_date
-) VALUES (%?, %?, %?, %?, %?, %?, %?, %?, %?, %?, %?, %?)`,
-			binding.originalSQL,
-			binding.bindSQL,
-			binding.defaultDB,
-			binding.status,
-			binding.createTime.String(),
-			binding.updateTime.String(),
-			binding.charset,
-			binding.collation,
-			binding.source,
-			sqlDigest,
-			planDigest,
-			binding.lastUsedDate,
-		)
+	for _, updateArgs := range updateRows {
+		mustExecute(s, "UPDATE mysql.bind_info SET original_sql = %?, sql_digest = %? WHERE _tidb_rowid = %?",
+			updateArgs[0], updateArgs[1], updateArgs[2])
 	}
 }
 

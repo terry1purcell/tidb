@@ -151,6 +151,13 @@ type sqlDigester struct {
 	lexer  *Scanner
 	hasher hash2.Hash
 	tokens tokenDeque
+	// parenMatches and parenRemoved are scratch buffers reused across calls to
+	// reduceRedundantParenthesesForBinding. Keeping them on the struct avoids
+	// per-call heap allocation; the pool in digesterPool lets us amortize
+	// allocation across many queries on the same goroutine.
+	parenMatches []int
+	parenRemoved []bool
+	parenStack   []int
 }
 
 func (d *sqlDigester) doDigestNormalized(normalized string) (digest *Digest) {
@@ -258,6 +265,9 @@ func (d *sqlDigester) normalize(sql string, redact string, keepHint bool, forBin
 		d.tokens.pushBack(currTok)
 	}
 	d.lexer.reset("")
+	if forBinding {
+		d.reduceRedundantParenthesesForBinding()
+	}
 	for i, token := range d.tokens {
 		if i > 0 {
 			d.buffer.WriteRune(' ')
@@ -276,6 +286,328 @@ func (d *sqlDigester) normalize(sql string, redact string, keepHint bool, forBin
 		}
 	}
 	d.tokens.reset()
+}
+
+const (
+	// Lower values mean lower precedence, which makes them more likely to require
+	// parentheses when embedded inside a stronger outer operator.
+	bindingParenBoundaryPrec = 0
+	bindingParenOrPrec       = 1
+	bindingParenXorPrec      = 2
+	bindingParenAndPrec      = 3
+	bindingParenCmpPrec      = 4
+)
+
+// reduceRedundantParenthesesForBinding removes wrapper parentheses that do not
+// affect binding matching semantics, while keeping precedence-preserving pairs
+// such as "a and (b or c)" intact.
+//
+// This binding-only reducer is intentionally conservative. It handles common
+// boolean/comparison parenthesis patterns with a lightweight token-based pass,
+// and leaves unsupported or ambiguous cases unchanged on purpose. That keeps
+// the matching path simple and low-risk without changing the generic SQL
+// normalization/digest behavior.
+func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
+	if len(d.tokens) < 3 {
+		return
+	}
+
+	// Fast path: skip the full pass when no '(' is immediately preceded by a
+	// boundary or logical token. This covers the majority of OLTP queries, such
+	// as "SELECT ... WHERE id = ?" or "SELECT f(a) FROM t", where the only
+	// parentheses are function-call parens that can never be redundant in the
+	// binding sense. The scan is O(n) but allocation-free, which is much cheaper
+	// than the two O(n) slice growths below.
+	hasCandidateParen := false
+	for i, tok := range d.tokens {
+		if tok.lit != "(" {
+			continue
+		}
+		if i == 0 {
+			hasCandidateParen = true
+			break
+		}
+		prev := d.tokens[i-1]
+		if d.isBindingParenBoundaryBefore(prev) ||
+			prev.lit == "or" || prev.lit == "and" || prev.lit == "xor" {
+			hasCandidateParen = true
+			break
+		}
+	}
+	if !hasCandidateParen {
+		return
+	}
+
+	// Grow the struct-level scratch buffers to cover the current token count.
+	// Because sqlDigester is pool-allocated, these slices survive across calls
+	// on the same pooled instance, so we only pay for growth — not for
+	// reallocation on every query.
+	n := len(d.tokens)
+	if cap(d.parenMatches) < n {
+		d.parenMatches = make([]int, n)
+	}
+	matches := d.parenMatches[:n]
+	if cap(d.parenStack) < n {
+		d.parenStack = make([]int, 0, n)
+	}
+	stack := d.parenStack[:0]
+	// Pre-fill with -1 so unmatched parentheses are easy to detect later.
+	for i := range matches {
+		matches[i] = -1
+	}
+
+	// Build a bidirectional map between each matched '(' and ')' so later
+	// checks can jump across nested pairs without rescanning for partners.
+	// For example:
+	// tokens:  ( a and ( b or c ) )
+	// indexes: 0 1  2   3 4 5  6 7 8
+	// matches: 8 -1 -1 7 -1 -1 -1 3 0
+	for i, tok := range d.tokens {
+		switch tok.lit {
+		case "(":
+			stack = append(stack, i)
+		case ")":
+			if len(stack) == 0 {
+				continue
+			}
+			openIdx := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			matches[openIdx] = i
+			matches[i] = openIdx
+		}
+	}
+
+	if cap(d.parenRemoved) < n {
+		d.parenRemoved = make([]bool, n)
+	}
+	removed := d.parenRemoved[:n]
+	for i := range removed {
+		removed[i] = false
+	}
+
+	changed := false
+	// Walk from the innermost pairs outward. Once an inner pair is marked as
+	// removable, outer candidates should analyze the simplified shape rather
+	// than the original token stream.
+	for i := n - 1; i >= 0; i-- {
+		// Only an opening parenthesis can start a candidate pair, and already
+		// removed pairs do not need to be revisited.
+		if d.tokens[i].lit == "(" && !removed[i] {
+			closeIdx := matches[i]
+			if closeIdx == -1 || removed[closeIdx] {
+				continue
+			}
+			if d.canRemoveBindingParens(i, closeIdx, matches, removed) {
+				removed[i] = true
+				removed[closeIdx] = true
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return
+	}
+
+	normalized := make(tokenDeque, 0, n)
+	// Compact the token stream after the removal decisions are finalized.
+	for i, tok := range d.tokens {
+		if removed[i] {
+			continue
+		}
+		normalized = append(normalized, tok)
+	}
+	d.tokens = normalized
+}
+
+// canRemoveBindingParens decides whether one parenthesized range can be
+// removed without changing binding matching semantics.
+//
+// Step 1. Find the lowest-precedence operator inside the pair. This operator
+// represents the whole inner expression for grouping purposes.
+//
+// Step 2. Classify the operators immediately outside the pair on the left and
+// right side.
+//
+// Step 3. Remove the pair only when both outer sides are no stronger than that
+// lowest-precedence inner operator.
+//
+// Concrete example:
+//   - In "a or (b and c)", Step 1 finds inner "and". Step 2 sees outer "or"
+//     on the left and a boundary on the right. Step 3 removes the pair,
+//     because "and" already binds tighter than "or".
+//   - In "a and (b or c)", Step 1 finds inner "or". Step 2 sees outer "and"
+//     on the left and a boundary on the right. Step 3 keeps the pair, because
+//     removing it would regroup the expression as "(a and b) or c".
+func (d *sqlDigester) canRemoveBindingParens(openIdx, closeIdx int, matches []int, removed []bool) bool {
+	innerPrec, ok := d.bindingParenInnerPrecedence(openIdx, closeIdx, matches, removed)
+	if !ok {
+		return false
+	}
+
+	prevIdx := d.prevActiveTokenIndex(openIdx, removed)
+	nextIdx := d.nextActiveTokenIndex(closeIdx, removed)
+	leftPrec, ok := d.bindingOuterParenPrecedence(prevIdx, true)
+	if !ok {
+		return false
+	}
+	rightPrec, ok := d.bindingOuterParenPrecedence(nextIdx, false)
+	if !ok {
+		return false
+	}
+	return leftPrec <= innerPrec && rightPrec <= innerPrec
+}
+
+// bindingParenInnerPrecedence returns the lowest-precedence operator that
+// appears inside one parenthesized range after skipping already-removed inner
+// pairs.
+//
+// The lowest-precedence operator represents the whole inner expression for the
+// purpose of deciding whether the wrapper pair is redundant. Stronger operators
+// nested inside it do not matter once a weaker operator is present. For
+// example:
+//   - "(a = 1 and b = 2)" returns "and", not "=".
+//   - "(a = 1 or b = 2 and c = 3)" returns "or", because that outermost "or"
+//     is what makes "a and (b or c)"-style cases unsafe to flatten.
+//
+// Ranges that are not simple boolean/comparison expressions are left
+// untouched.
+func (d *sqlDigester) bindingParenInnerPrecedence(openIdx, closeIdx int, matches []int, removed []bool) (int, bool) {
+	firstIdx := d.nextActiveTokenIndex(openIdx, removed)
+	lastIdx := d.prevActiveTokenIndex(closeIdx, removed)
+	if firstIdx == -1 || lastIdx == -1 || firstIdx > lastIdx {
+		return 0, false
+	}
+
+	if d.tokens[firstIdx].lit == "(" && matches[firstIdx] == lastIdx {
+		return d.bindingParenInnerPrecedence(firstIdx, lastIdx, matches, removed)
+	}
+
+	// Start above the strongest supported precedence so the first recognized
+	// operator lowers the value.
+	innerPrec := bindingParenCmpPrec + 1
+	betweenPending := false
+	for i := firstIdx; i <= lastIdx; i++ {
+		if removed[i] {
+			continue
+		}
+		tok := d.tokens[i]
+		if tok.lit == "(" {
+			i = matches[i]
+			if i == -1 {
+				return 0, false
+			}
+			continue
+		}
+
+		switch tok.lit {
+		case "or":
+			if bindingParenOrPrec < innerPrec {
+				innerPrec = bindingParenOrPrec
+			}
+		case "xor":
+			if bindingParenXorPrec < innerPrec {
+				innerPrec = bindingParenXorPrec
+			}
+		case "and":
+			if betweenPending {
+				betweenPending = false
+				continue
+			}
+			if bindingParenAndPrec < innerPrec {
+				innerPrec = bindingParenAndPrec
+			}
+		case "between":
+			betweenPending = true
+			if bindingParenCmpPrec < innerPrec {
+				innerPrec = bindingParenCmpPrec
+			}
+		case "=", ">", "<", ">=", "<=", "!=", "<>", "<=>", "is", "in", "like", "ilike", "regexp":
+			if bindingParenCmpPrec < innerPrec {
+				innerPrec = bindingParenCmpPrec
+			}
+		}
+	}
+	if innerPrec > bindingParenCmpPrec {
+		return 0, false
+	}
+	return innerPrec, true
+}
+
+// bindingOuterParenPrecedence classifies the token adjacent to a parenthesis
+// pair. It treats clause boundaries like WHERE/ON/commas as the weakest outer
+// context so top-level wrappers can be removed safely.
+func (d *sqlDigester) bindingOuterParenPrecedence(idx int, isPrev bool) (int, bool) {
+	if idx == -1 {
+		return bindingParenBoundaryPrec, true
+	}
+
+	switch d.tokens[idx].lit {
+	case "or":
+		return bindingParenOrPrec, true
+	case "xor":
+		return bindingParenXorPrec, true
+	case "and":
+		return bindingParenAndPrec, true
+	}
+
+	if isPrev {
+		if d.isBindingParenBoundaryBefore(d.tokens[idx]) {
+			return bindingParenBoundaryPrec, true
+		}
+		return 0, false
+	}
+	if d.isBindingParenBoundaryAfter(d.tokens[idx]) {
+		return bindingParenBoundaryPrec, true
+	}
+	return 0, false
+}
+
+// isBindingParenBoundaryBefore reports whether a token can safely appear before
+// a removable binding parenthesis pair without imposing additional precedence.
+func (*sqlDigester) isBindingParenBoundaryBefore(tok token) bool {
+	switch tok.lit {
+	case "where", "having", "on", "when", "(", ",", "then", "else":
+		return true
+	default:
+		return false
+	}
+}
+
+// isBindingParenBoundaryAfter reports whether a token can safely appear after a
+// removable binding parenthesis pair without imposing additional precedence.
+// Note: "straight_join" is intentionally absent; reduceOptimizerHint rewrites
+// it to "join" before this pass runs, so it can never appear here.
+func (*sqlDigester) isBindingParenBoundaryAfter(tok token) bool {
+	switch tok.lit {
+	case ")", ",", "order", "group", "limit", "having", "when", "then", "else",
+		"union", "intersect", "except", "join", "left", "right", "inner", "cross",
+		"where", "window":
+		return true
+	default:
+		return false
+	}
+}
+
+// prevActiveTokenIndex finds the nearest token to the left that has not already
+// been marked for removal.
+func (*sqlDigester) prevActiveTokenIndex(idx int, removed []bool) int {
+	for i := idx - 1; i >= 0; i-- {
+		if !removed[i] {
+			return i
+		}
+	}
+	return -1
+}
+
+// nextActiveTokenIndex finds the nearest token to the right that has not
+// already been marked for removal.
+func (*sqlDigester) nextActiveTokenIndex(idx int, removed []bool) int {
+	for i := idx + 1; i < len(removed); i++ {
+		if !removed[i] {
+			return i
+		}
+	}
+	return -1
 }
 
 func (d *sqlDigester) reduceOptimizerHint(tok *token) (reduced bool) {

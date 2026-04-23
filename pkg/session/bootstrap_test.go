@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/meta/metadef"
 	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -1770,6 +1771,88 @@ func TestTiDBUpgradeToVer254(t *testing.T) {
 	require.Contains(t, createWatchSQL, "idx_start_time")
 	createWatchDoneSQL = getTableCreateSQLFn(seCurVer, "tidb_runaway_watch_done")
 	require.Contains(t, createWatchDoneSQL, "idx_done_time")
+}
+
+func TestTiDBUpgradeToVer259(t *testing.T) {
+	if kerneltype.IsNextGen() {
+		t.Skip("Skip this case because there is no upgrade in the first release of next-gen kernel")
+	}
+	ctx := context.Background()
+	store, dom := CreateStoreAndBootstrap(t)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	seV258 := CreateSessionAndSetID(t, store)
+	MustExec(t, seV258, "USE test")
+	MustExec(t, seV258, "CREATE TABLE t259 (a INT, b INT)")
+	// Create a binding whose WHERE clause has redundant parentheses.
+	// After upgradeToVer259, both original_sql and sql_digest must be updated to
+	// the result of NormalizeDigestForBinding, which now strips those parens.
+	MustExec(t, seV258,
+		"CREATE GLOBAL BINDING FOR SELECT * FROM t259 WHERE (a = 1 AND b = 1) "+
+			"USING SELECT * FROM t259 WHERE (a = 1 AND b = 1)")
+
+	res := MustExecToRecodeSet(t, seV258,
+		"SELECT bind_sql FROM mysql.bind_info WHERE source='manual' AND original_sql LIKE '%t259%'")
+	chk := res.NewChunk(nil)
+	err := res.Next(ctx, chk)
+	require.NoError(t, err)
+	require.Equal(t, 1, chk.NumRows())
+	bindSQL := chk.GetRow(0).GetString(0)
+	require.NoError(t, res.Close())
+
+	// Simulate what the old code would have stored: use NormalizeDigest (not
+	// NormalizeForBinding) to produce a stale original_sql and sql_digest that
+	// still contains the redundant parentheses.
+	staleNormSQL, staleSQLDigestObj := parser.NormalizeDigest(bindSQL)
+	expectedNormSQL, expectedSQLDigestObj := parser.NormalizeDigestForBinding(bindSQL)
+	// Sanity-check that the two forms actually differ (the test is only useful
+	// if the stale and expected values differ).
+	require.NotEqual(t, staleSQLDigestObj.String(), expectedSQLDigestObj.String())
+	require.NotEqual(t, staleNormSQL, expectedNormSQL)
+
+	// Overwrite the row with stale values to simulate a pre-259 binding.
+	MustExec(t, seV258,
+		"UPDATE mysql.bind_info SET original_sql = ?, sql_digest = ? "+
+			"WHERE source = 'manual' AND original_sql LIKE '%t259%'",
+		staleNormSQL, staleSQLDigestObj.String())
+
+	ver258 := version258
+	txn, err := store.Begin()
+	require.NoError(t, err)
+	m := meta.NewMutator(txn)
+	err = m.FinishBootstrap(int64(ver258))
+	require.NoError(t, err)
+	RevertVersionAndVariables(t, seV258, ver258)
+	err = txn.Commit(ctx)
+	require.NoError(t, err)
+	store.SetOption(StoreBootstrappedKey, nil)
+
+	ver, err := GetBootstrapVersion(seV258)
+	require.NoError(t, err)
+	require.Equal(t, int64(ver258), ver)
+
+	dom.Close()
+	domCurVer, err := BootstrapSession(store)
+	require.NoError(t, err)
+	defer domCurVer.Close()
+	seCurVer := CreateSessionAndSetID(t, store)
+	ver, err = GetBootstrapVersion(seCurVer)
+	require.NoError(t, err)
+	require.Equal(t, currentBootstrapVersion, ver)
+
+	res = MustExecToRecodeSet(t, seCurVer,
+		"SELECT original_sql, sql_digest FROM mysql.bind_info "+
+			"WHERE source = 'manual' AND bind_sql = ?", bindSQL)
+	chk = res.NewChunk(nil)
+	err = res.Next(ctx, chk)
+	require.NoError(t, err)
+	require.Equal(t, 1, chk.NumRows())
+	updatedOrigSQL := chk.GetRow(0).GetString(0)
+	updatedDigest := chk.GetRow(0).GetString(1)
+	require.NoError(t, res.Close())
+
+	require.Equal(t, expectedNormSQL, updatedOrigSQL)
+	require.Equal(t, expectedSQLDigestObj.String(), updatedDigest)
 }
 
 func TestWriteClusterIDToMySQLTiDBWhenUpgradingTo242(t *testing.T) {

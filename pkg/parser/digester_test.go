@@ -103,6 +103,42 @@ func TestNormalize(t *testing.T) {
 		require.Equal(t, normalized, normalized2)
 		require.Equalf(t, digest.String(), digest2.String(), "%+v", test)
 	}
+
+	const normalizedParenthesizedBinding = "select `pid` from `t` where `id` = ? and ( `ptype` = ? or `ptype` = ? ) order by `pid` limit ?"
+	parenthesizedBindingQueries := []string{
+		"select pid from t where id=1 and (ptype=1 or ptype=2) order by pid limit 10",
+		"select pid from t where id=1 and ((ptype=1) or ptype=2) order by pid limit 10",
+		"select pid from t where id=1 and (ptype=1 or (ptype=2)) order by pid limit 10",
+		"select pid from t where id=1 and ((ptype=1) or (ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1) and (ptype=1 or ptype=2) order by pid limit 10",
+		"select pid from t where (id=1) and ((ptype=1) or ptype=2) order by pid limit 10",
+		"select pid from t where (id=1) and (ptype=1 or (ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1) and ((ptype=1) or (ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1 and (ptype=1 or ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1 and ((ptype=1) or ptype=2)) order by pid limit 10",
+		"select pid from t where (id=1 and (ptype=1 or (ptype=2))) order by pid limit 10",
+		"select pid from t where (id=1 and ((ptype=1) or (ptype=2))) order by pid limit 10",
+		"select pid from t where ((id=1) and (ptype=1 or ptype=2)) order by pid limit 10",
+		"select pid from t where ((id=1) and ((ptype=1) or ptype=2)) order by pid limit 10",
+		"select pid from t where ((id=1) and (ptype=1 or (ptype=2))) order by pid limit 10",
+		"select pid from t where ((id=1) and ((ptype=1) or (ptype=2))) order by pid limit 10",
+	}
+	var referenceDigest string
+	for i, sql := range parenthesizedBindingQueries {
+		normalized := parser.NormalizeForBinding(sql, false)
+		digest := parser.DigestNormalized(normalized)
+		require.Equalf(t, normalizedParenthesizedBinding, normalized, "sql %d: %s", i, sql)
+
+		normalized2, digest2 := parser.NormalizeDigestForBinding(sql)
+		require.Equalf(t, normalized, normalized2, "sql %d: %s", i, sql)
+		require.Equalf(t, digest.String(), digest2.String(), "sql %d: %s", i, sql)
+
+		if i == 0 {
+			referenceDigest = digest.String()
+			continue
+		}
+		require.Equalf(t, referenceDigest, digest.String(), "sql %d: %s", i, sql)
+	}
 }
 
 func TestNormalizeRedact(t *testing.T) {
@@ -245,6 +281,46 @@ func genRandDigest(str string) []byte {
 	hasher := sha256.New()
 	hasher.Write([]byte(str))
 	return hasher.Sum(nil)
+}
+
+// BenchmarkNormalizeDigestForBinding measures the per-call cost of
+// NormalizeDigestForBinding across three representative cases:
+//
+//   - NoParen: a typical OLTP point-get with no logical-operator parentheses.
+//     This exercises the fast-path early exit added in the paren-reduction pass.
+//   - WithRedundantParen: a WHERE clause with parentheses that are redundant and
+//     can be stripped.  This exercises the full reduction pass.
+//   - WithSignificantParen: a WHERE clause where the parentheses are semantically
+//     required (a AND (b OR c)).  This exercises the full reduction pass but
+//     produces no changes.
+//
+// Run with: go test -bench=BenchmarkNormalizeDigestForBinding -benchmem ./pkg/parser/
+func BenchmarkNormalizeDigestForBinding(b *testing.B) {
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "NoParen",
+			sql:  "select * from t where id = 1 and status = 2 and name = 'alice'",
+		},
+		{
+			name: "WithRedundantParen",
+			sql:  "select pid from t where (id=1) and ((ptype=1) or (ptype=2)) order by pid limit 10",
+		},
+		{
+			name: "WithSignificantParen",
+			sql:  "select * from t where a = 1 and (b = 2 or c = 3) and d = 4",
+		},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _ = parser.NormalizeDigestForBinding(tc.sql)
+			}
+		})
+	}
 }
 
 func BenchmarkDigestHexEncode(b *testing.B) {

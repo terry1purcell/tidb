@@ -300,10 +300,17 @@ func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 	}
 
 	matches := make([]int, len(d.tokens))
+	// Pre-fill with -1 so unmatched parentheses are easy to detect later.
 	for i := range matches {
 		matches[i] = -1
 	}
 	stack := make([]int, 0, 8)
+	// Build a bidirectional map between each matched '(' and ')' so later
+	// checks can jump across nested pairs without rescanning for partners.
+	// For example:
+	// tokens:  ( a and ( b or c ) )
+	// indexes: 0 1  2   3 4 5  6 7 8
+	// matches: 8 -1 -1 7 -1 -1 -1 3 0
 	for i, tok := range d.tokens {
 		switch tok.lit {
 		case "(":
@@ -321,18 +328,22 @@ func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 
 	removed := make([]bool, len(d.tokens))
 	changed := false
+	// Walk from the innermost pairs outward. Once an inner pair is marked as
+	// removable, outer candidates should analyze the simplified shape rather
+	// than the original token stream.
 	for i := len(d.tokens) - 1; i >= 0; i-- {
-		if d.tokens[i].lit != "(" || removed[i] {
-			continue
-		}
-		closeIdx := matches[i]
-		if closeIdx == -1 || removed[closeIdx] {
-			continue
-		}
-		if d.canRemoveBindingParens(i, closeIdx, matches, removed) {
-			removed[i] = true
-			removed[closeIdx] = true
-			changed = true
+		// Only an opening parenthesis can start a candidate pair, and already
+		// removed pairs do not need to be revisited.
+		if d.tokens[i].lit == "(" && !removed[i] {
+			closeIdx := matches[i]
+			if closeIdx == -1 || removed[closeIdx] {
+				continue
+			}
+			if d.canRemoveBindingParens(i, closeIdx, matches, removed) {
+				removed[i] = true
+				removed[closeIdx] = true
+				changed = true
+			}
 		}
 	}
 	if !changed {
@@ -340,6 +351,7 @@ func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 	}
 
 	normalized := make(tokenDeque, 0, len(d.tokens))
+	// Compact the token stream after the removal decisions are finalized.
 	for i, tok := range d.tokens {
 		if removed[i] {
 			continue
@@ -349,10 +361,25 @@ func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 	d.tokens = normalized
 }
 
-// canRemoveBindingParens compares the strongest operator inside the
-// parenthesized range with the operators immediately outside it. The pair can
-// be removed only when the surrounding context is not weaker than the inner
-// expression.
+// canRemoveBindingParens decides whether one parenthesized range can be
+// removed without changing binding matching semantics.
+//
+// Step 1. Find the lowest-precedence operator inside the pair. This operator
+// represents the whole inner expression for grouping purposes.
+//
+// Step 2. Classify the operators immediately outside the pair on the left and
+// right side.
+//
+// Step 3. Remove the pair only when both outer sides are no stronger than that
+// lowest-precedence inner operator.
+//
+// Concrete example:
+//   - In "a or (b and c)", Step 1 finds inner "and". Step 2 sees outer "or"
+//     on the left and a boundary on the right. Step 3 removes the pair,
+//     because "and" already binds tighter than "or".
+//   - In "a and (b or c)", Step 1 finds inner "or". Step 2 sees outer "and"
+//     on the left and a boundary on the right. Step 3 keeps the pair, because
+//     removing it would regroup the expression as "(a and b) or c".
 func (d *sqlDigester) canRemoveBindingParens(openIdx, closeIdx int, matches []int, removed []bool) bool {
 	innerPrec, ok := d.bindingParenInnerPrecedence(openIdx, closeIdx, matches, removed)
 	if !ok {
@@ -374,7 +401,17 @@ func (d *sqlDigester) canRemoveBindingParens(openIdx, closeIdx int, matches []in
 
 // bindingParenInnerPrecedence returns the lowest-precedence operator that
 // appears inside one parenthesized range after skipping already-removed inner
-// pairs. Ranges that are not simple boolean/comparison expressions are left
+// pairs.
+//
+// The lowest-precedence operator represents the whole inner expression for the
+// purpose of deciding whether the wrapper pair is redundant. Stronger operators
+// nested inside it do not matter once a weaker operator is present. For
+// example:
+//   - "(a = 1 and b = 2)" returns "and", not "=".
+//   - "(a = 1 or b = 2 and c = 3)" returns "or", because that outermost "or"
+//     is what makes "a and (b or c)"-style cases unsafe to flatten.
+//
+// Ranges that are not simple boolean/comparison expressions are left
 // untouched.
 func (d *sqlDigester) bindingParenInnerPrecedence(openIdx, closeIdx int, matches []int, removed []bool) (int, bool) {
 	firstIdx := d.nextActiveTokenIndex(openIdx, removed)
@@ -387,6 +424,8 @@ func (d *sqlDigester) bindingParenInnerPrecedence(openIdx, closeIdx int, matches
 		return d.bindingParenInnerPrecedence(firstIdx, lastIdx, matches, removed)
 	}
 
+	// Start above the strongest supported precedence so the first recognized
+	// operator lowers the value.
 	innerPrec := bindingParenCmpPrec + 1
 	betweenPending := false
 	for i := firstIdx; i <= lastIdx; i++ {

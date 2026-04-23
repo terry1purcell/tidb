@@ -294,6 +294,12 @@ const (
 // reduceRedundantParenthesesForBinding removes wrapper parentheses that do not
 // affect binding matching semantics, while keeping precedence-preserving pairs
 // such as "a and (b or c)" intact.
+//
+// This binding-only reducer is intentionally conservative. It handles common
+// boolean/comparison parenthesis patterns with a lightweight token-based pass,
+// and leaves unsupported or ambiguous cases unchanged on purpose. That keeps
+// the matching path simple and low-risk without changing the generic SQL
+// normalization/digest behavior.
 func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 	if len(d.tokens) < 3 {
 		return

@@ -147,10 +147,17 @@ var digesterPool = sync.Pool{
 
 // sqlDigester is used to compute DigestHash or Normalize for sql.
 type sqlDigester struct {
-	buffer bytes.Buffer
-	lexer  *Scanner
-	hasher hash2.Hash
-	tokens tokenDeque
+	buffer  bytes.Buffer
+	lexer   *Scanner
+	hasher  hash2.Hash
+	tokens  tokenDeque
+	// parenMatches and parenRemoved are scratch buffers reused across calls to
+	// reduceRedundantParenthesesForBinding. Keeping them on the struct avoids
+	// per-call heap allocation; the pool in digesterPool lets us amortize
+	// allocation across many queries on the same goroutine.
+	parenMatches []int
+	parenRemoved []bool
+	parenStack   []int
 }
 
 func (d *sqlDigester) doDigestNormalized(normalized string) (digest *Digest) {
@@ -305,12 +312,50 @@ func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 		return
 	}
 
-	matches := make([]int, len(d.tokens))
+	// Fast path: skip the full pass when no '(' is immediately preceded by a
+	// boundary or logical token. This covers the majority of OLTP queries, such
+	// as "SELECT ... WHERE id = ?" or "SELECT f(a) FROM t", where the only
+	// parentheses are function-call parens that can never be redundant in the
+	// binding sense. The scan is O(n) but allocation-free, which is much cheaper
+	// than the two O(n) slice growths below.
+	hasCandidateParen := false
+	for i, tok := range d.tokens {
+		if tok.lit != "(" {
+			continue
+		}
+		if i == 0 {
+			hasCandidateParen = true
+			break
+		}
+		prev := d.tokens[i-1]
+		if d.isBindingParenBoundaryBefore(prev) ||
+			prev.lit == "or" || prev.lit == "and" || prev.lit == "xor" {
+			hasCandidateParen = true
+			break
+		}
+	}
+	if !hasCandidateParen {
+		return
+	}
+
+	// Grow the struct-level scratch buffers to cover the current token count.
+	// Because sqlDigester is pool-allocated, these slices survive across calls
+	// on the same pooled instance, so we only pay for growth — not for
+	// reallocation on every query.
+	n := len(d.tokens)
+	if cap(d.parenMatches) < n {
+		d.parenMatches = make([]int, n)
+	}
+	matches := d.parenMatches[:n]
+	if cap(d.parenStack) < n {
+		d.parenStack = make([]int, 0, n)
+	}
+	stack := d.parenStack[:0]
 	// Pre-fill with -1 so unmatched parentheses are easy to detect later.
 	for i := range matches {
 		matches[i] = -1
 	}
-	stack := make([]int, 0, 8)
+
 	// Build a bidirectional map between each matched '(' and ')' so later
 	// checks can jump across nested pairs without rescanning for partners.
 	// For example:
@@ -332,12 +377,19 @@ func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 		}
 	}
 
-	removed := make([]bool, len(d.tokens))
+	if cap(d.parenRemoved) < n {
+		d.parenRemoved = make([]bool, n)
+	}
+	removed := d.parenRemoved[:n]
+	for i := range removed {
+		removed[i] = false
+	}
+
 	changed := false
 	// Walk from the innermost pairs outward. Once an inner pair is marked as
 	// removable, outer candidates should analyze the simplified shape rather
 	// than the original token stream.
-	for i := len(d.tokens) - 1; i >= 0; i-- {
+	for i := n - 1; i >= 0; i-- {
 		// Only an opening parenthesis can start a candidate pair, and already
 		// removed pairs do not need to be revisited.
 		if d.tokens[i].lit == "(" && !removed[i] {
@@ -356,7 +408,7 @@ func (d *sqlDigester) reduceRedundantParenthesesForBinding() {
 		return
 	}
 
-	normalized := make(tokenDeque, 0, len(d.tokens))
+	normalized := make(tokenDeque, 0, n)
 	// Compact the token stream after the removal decisions are finalized.
 	for i, tok := range d.tokens {
 		if removed[i] {
@@ -523,11 +575,13 @@ func (*sqlDigester) isBindingParenBoundaryBefore(tok token) bool {
 
 // isBindingParenBoundaryAfter reports whether a token can safely appear after a
 // removable binding parenthesis pair without imposing additional precedence.
+// Note: "straight_join" is intentionally absent; reduceOptimizerHint rewrites
+// it to "join" before this pass runs, so it can never appear here.
 func (*sqlDigester) isBindingParenBoundaryAfter(tok token) bool {
 	switch tok.lit {
 	case ")", ",", "order", "group", "limit", "having", "when", "then", "else",
 		"union", "intersect", "except", "join", "left", "right", "inner", "cross",
-		"straight_join", "where", "window":
+		"where", "window":
 		return true
 	default:
 		return false

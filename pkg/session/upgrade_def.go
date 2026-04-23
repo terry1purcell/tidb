@@ -493,6 +493,10 @@ const (
 	// Add the default value management for `tidb_analyze_distsql_scan_concurrency`.
 	// If the cluster is upgraded from a version that has no such variable, we set it to the global.tidb_distsql_scan_concurrency value.
 	version258 = 258
+
+	// version259 rewrites persisted binding original_sql and sql_digest after
+	// WHERE-parentheses normalization was added to NormalizeForBinding.
+	version259 = 259
 )
 
 // versionedUpgradeFunction is a struct that holds the upgrade function related
@@ -506,7 +510,7 @@ type versionedUpgradeFunction struct {
 
 // currentBootstrapVersion is defined as a variable, so we can modify its value for testing.
 // please make sure this is the largest version
-var currentBootstrapVersion int64 = version258
+var currentBootstrapVersion int64 = version259
 
 var (
 	// this list must be ordered by version in ascending order, and the function
@@ -689,6 +693,7 @@ var (
 		{version: version256, fn: upgradeToVer256},
 		{version: version257, fn: upgradeToVer257},
 		{version: version258, fn: upgradeToVer258},
+		{version: version259, fn: upgradeToVer259},
 	}
 )
 
@@ -2108,4 +2113,129 @@ func upgradeToVer258(s sessionapi.Session, _ int64) {
 		return
 	}
 	initGlobalVariableIfNotExists(s, vardef.TiDBAnalyzeDistSQLScanConcurrency, rows[0].GetString(0))
+}
+
+// upgradeToVer259 rewrites original_sql and sql_digest for all non-builtin
+// bindings after WHERE-parentheses normalization was added to NormalizeForBinding.
+// Redundant parentheses are now stripped during normalization, so previously
+// stored original_sql values and their digests may differ from what the current
+// code would produce for the same bind_sql.
+//
+// For each row it computes the new (original_sql, sql_digest) pair and attempts
+// an UPDATE. If the update conflicts with the (plan_digest, sql_digest) unique
+// index (two bindings that previously had different digests now share one), it
+// falls back to setting sql_digest = NULL, which allows the row to coexist with
+// any other binding while losing digest-based plan caching for that entry. The
+// binding itself (bind_sql) is preserved in all cases.
+func upgradeToVer259(s sessionapi.Session, _ int64) {
+	var err error
+	mustExecute(s, "BEGIN PESSIMISTIC")
+	defer func() {
+		if err != nil {
+			mustExecute(s, "ROLLBACK")
+			return
+		}
+		mustExecute(s, "COMMIT")
+	}()
+
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnBootstrap)
+	// Select _tidb_rowid to use as a stable per-row identifier; this avoids
+	// matching on LONGTEXT columns and is safe for in-transaction updates.
+	rs, err := s.ExecuteInternal(ctx,
+		"SELECT _tidb_rowid, original_sql, bind_sql, default_db, charset, collation, sql_digest "+
+			"FROM mysql.bind_info WHERE source != 'builtin'")
+	if err != nil {
+		logutil.BgLogger().Fatal("upgradeToVer259 error reading bind_info", zap.Error(err))
+		return
+	}
+
+	type bindRow struct {
+		rowID          int64
+		oldOriginalSQL string
+		oldSQLDigest   string
+		// Safe fields for logging — deliberately exclude bind_sql.
+		defaultDB  string
+		charset    string
+		collation  string
+		newOrigSQL string
+		newDigest  string
+	}
+
+	req := rs.NewChunk(nil)
+	var updates []bindRow
+	for {
+		if err = rs.Next(ctx, req); err != nil {
+			logutil.BgLogger().Fatal("upgradeToVer259 error reading bind_info rows", zap.Error(err))
+			return
+		}
+		if req.NumRows() == 0 {
+			break
+		}
+		for i := range req.NumRows() {
+			row := req.GetRow(i)
+			rowID := row.GetInt64(0)
+			oldOrigSQL := row.GetString(1)
+			bindSQL := row.GetString(2)
+			defaultDB := row.GetString(3)
+			charset := row.GetString(4)
+			collation := row.GetString(5)
+			oldDigest := ""
+			if !row.IsNull(6) {
+				oldDigest = row.GetString(6)
+			}
+
+			newOrigSQL, newDigestObj := parser.NormalizeDigestForBinding(bindSQL)
+			newDigest := newDigestObj.String()
+			if oldOrigSQL == newOrigSQL && oldDigest == newDigest {
+				continue
+			}
+			updates = append(updates, bindRow{
+				rowID:          rowID,
+				oldOriginalSQL: oldOrigSQL,
+				oldSQLDigest:   oldDigest,
+				defaultDB:      defaultDB,
+				charset:        charset,
+				collation:      collation,
+				newOrigSQL:     newOrigSQL,
+				newDigest:      newDigest,
+			})
+		}
+		req.Reset()
+	}
+	if closeErr := rs.Close(); closeErr != nil {
+		logutil.BgLogger().Fatal("upgradeToVer259 error closing record set", zap.Error(closeErr))
+	}
+
+	for _, u := range updates {
+		_, err = s.ExecuteInternal(ctx,
+			"UPDATE mysql.bind_info SET original_sql = %?, sql_digest = %? WHERE _tidb_rowid = %?",
+			u.newOrigSQL, u.newDigest, u.rowID)
+		if err == nil {
+			continue
+		}
+		// A unique-index collision means two bindings that previously had
+		// different sql_digests now normalize to the same one. Keep the row
+		// usable by setting sql_digest = NULL; the bind_sql and original_sql
+		// are still updated so the binding is found by the normalized form.
+		if kv.ErrKeyExists.Equal(err) {
+			logutil.BgLogger().Warn("upgradeToVer259: (plan_digest, sql_digest) collision after normalization; setting sql_digest to NULL",
+				zap.Int64("row_id", u.rowID),
+				zap.String("default_db", u.defaultDB),
+				zap.String("charset", u.charset),
+				zap.String("collation", u.collation),
+				zap.String("old_sql_digest", u.oldSQLDigest),
+				zap.String("new_sql_digest", u.newDigest),
+			)
+			_, err = s.ExecuteInternal(ctx,
+				"UPDATE mysql.bind_info SET original_sql = %?, sql_digest = NULL WHERE _tidb_rowid = %?",
+				u.newOrigSQL, u.rowID)
+		}
+		if err != nil {
+			logutil.BgLogger().Fatal("upgradeToVer259 error updating bind_info row",
+				zap.Int64("row_id", u.rowID),
+				zap.String("default_db", u.defaultDB),
+				zap.Error(err),
+			)
+		}
+	}
 }

@@ -563,7 +563,6 @@ func NewStmtCtxWithTimeZone(tz *time.Location) *StatementContext {
 	sc.RangeFallbackHandler = contextutil.NewRangeFallbackHandler(&sc.PlanCacheTracker, sc)
 	sc.WarnHandler = contextutil.NewStaticWarnHandler(0)
 	sc.ExtraWarnHandler = contextutil.NewStaticWarnHandler(0)
-	sc.RelatedTableIDs = make(map[int64]struct{})
 	return sc
 }
 
@@ -668,6 +667,7 @@ func (sc *StatementContext) ResetAlternativeLogicalPlanSignals() {
 	sc.AlternativeLogicalPlanSameOrderIndexJoin = false
 	sc.AlternativeLogicalPlanOrderAwareJoinReorder = false
 	sc.AlternativeLogicalPlanFTSLikeFallback = false
+	sc.AlternativeLogicalPlanPreferCorrelate = false
 }
 
 // MarkAlternativeLogicalPlanDecorrelatedApply records that at least one Apply has
@@ -686,6 +686,13 @@ func (sc *StatementContext) MarkAlternativeLogicalPlanSameOrderIndexJoin() {
 // logical build round produced an order-aware join reorder candidate.
 func (sc *StatementContext) MarkAlternativeLogicalPlanOrderAwareJoinReorder() {
 	sc.AlternativeLogicalPlanOrderAwareJoinReorder = true
+}
+
+// MarkAlternativeLogicalPlanPreferCorrelate records that the current logical
+// build round encountered a non-correlated IN subquery that is eligible for
+// the correlate-to-Apply alternative.
+func (sc *StatementContext) MarkAlternativeLogicalPlanPreferCorrelate() {
+	sc.AlternativeLogicalPlanPreferCorrelate = true
 }
 
 // CtxID returns the context id of the statement

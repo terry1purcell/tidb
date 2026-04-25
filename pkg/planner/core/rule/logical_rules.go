@@ -30,6 +30,7 @@ const (
 	FlagConstantPropagation
 	FlagConvertOuterToInnerJoin
 	FlagPredicatePushDown
+	FlagJoinKeyTypeCast
 	FlagEliminateOuterJoin
 	FlagPartitionProcessor
 	FlagCollectPredicateColumnsPoint
@@ -41,6 +42,7 @@ const (
 	FlagSyncWaitStatsLoadPoint
 	FlagJoinReOrder
 	FlagOuterJoinToSemiJoin
+	FlagCorrelate
 	FlagPruneColumnsAgain
 	FlagPushDownSequence
 	FlagEliminateUnionAllDualItem

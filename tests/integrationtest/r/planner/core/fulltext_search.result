@@ -127,5 +127,21 @@ id	title
 select id, title from articles where match(title) against('tutorial PostgreSQL -Security' in boolean mode);
 id	title
 4	MySQL vs. PostgreSQL
+select id, title from articles where match(title) against('MySQL, PostgreSQL.');
+id	title
+1	MySQL Tutorial
+2	How To Use MySQL Well
+3	Optimizing MySQL
+4	MySQL vs. PostgreSQL
+5	MySQL Security
+select id, title from articles where match(title) against('>MySQL <Security' in boolean mode);
+id	title
+1	MySQL Tutorial
+2	How To Use MySQL Well
+3	Optimizing MySQL
+4	MySQL vs. PostgreSQL
+5	MySQL Security
+select id, title from articles where match(title) against(NULL);
+id	title
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

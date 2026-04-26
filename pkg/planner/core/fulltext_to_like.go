@@ -141,6 +141,14 @@ func parseSearchTerm(word string) searchTerm {
 		word = word[1:]
 	}
 
+	// Strip MySQL relevance modifiers > and < (treat as optional in LIKE fallback)
+	if len(word) > 0 && (word[0] == '>' || word[0] == '<') {
+		word = word[1:]
+	}
+
+	// Strip grouping parentheses that MySQL uses for sub-expression grouping
+	word = strings.Trim(word, "()")
+
 	// Check for trailing wildcard and strip it (we don't use it differently, see struct comment)
 	if len(word) > 0 && word[len(word)-1] == '*' {
 		word = word[:len(word)-1]
@@ -148,6 +156,27 @@ func parseSearchTerm(word string) searchTerm {
 
 	term.word = word
 	return term
+}
+
+// stripTokenPunctuation removes leading and trailing non-word characters from a
+// natural-language search token so that punctuation attached to a word by the
+// tokenizer (e.g. "MySQL," → "MySQL") is not included in the LIKE pattern.
+// Non-ASCII bytes (> 127) are treated as word characters so multi-byte UTF-8
+// characters pass through unchanged.
+func stripTokenPunctuation(word string) string {
+	start := 0
+	for start < len(word) && !isWordByte(word[start]) {
+		start++
+	}
+	end := len(word)
+	for end > start && !isWordByte(word[end-1]) {
+		end--
+	}
+	return word[start:end]
+}
+
+func isWordByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c > 127
 }
 
 // convertMatchAgainstToLike converts a MATCH...AGAINST expression to LIKE predicates
@@ -323,6 +352,11 @@ func (er *expressionRewriter) convertMatchAgainstToLike(
 	for _, column := range columns {
 		var wordPredicates []expression.Expression
 		for _, word := range words {
+			// Strip leading/trailing punctuation so "MySQL," becomes "MySQL"
+			word = stripTokenPunctuation(word)
+			if word == "" {
+				continue
+			}
 			pred, err := er.buildLikePredicate(column, word)
 			if err != nil {
 				return nil, err
@@ -406,5 +440,18 @@ func (er *expressionRewriter) buildLikePredicate(
 		return nil, err
 	}
 
-	return likeFunc, nil
+	// Wrap with IFNULL so that a NULL column is treated as not containing the term
+	// (consistent with MySQL FTS semantics where NULL columns are ignored).
+	// Without this, NOT(NULL LIKE %term%) = NOT(NULL) = NULL which incorrectly
+	// filters rows that have a NULL column and don't contain the excluded term.
+	zeroConst := &expression.Constant{
+		Value:   types.NewIntDatum(0),
+		RetType: types.NewFieldType(mysql.TypeTiny),
+	}
+	nullSafeLike, err := er.newFunction(ast.Ifnull, types.NewFieldType(mysql.TypeTiny), likeFunc, zeroConst)
+	if err != nil {
+		return nil, err
+	}
+
+	return nullSafeLike, nil
 }

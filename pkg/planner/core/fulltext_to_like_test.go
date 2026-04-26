@@ -193,6 +193,24 @@ func TestParseSearchTerm(t *testing.T) {
 			input:    "+*",
 			expected: searchTerm{word: "", isRequired: true},
 		},
+		// MySQL relevance modifiers > and < are stripped; word is treated as optional
+		{
+			input:    ">word",
+			expected: searchTerm{word: "word"},
+		},
+		{
+			input:    "<word",
+			expected: searchTerm{word: "word"},
+		},
+		// Grouping parentheses are stripped
+		{
+			input:    "(word)",
+			expected: searchTerm{word: "word"},
+		},
+		{
+			input:    "(word*)",
+			expected: searchTerm{word: "word"},
+		},
 	}
 
 	for _, tt := range tests {

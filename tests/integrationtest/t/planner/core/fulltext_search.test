@@ -116,6 +116,15 @@ select id, title from articles where match(title) against('tutorial -Security' i
 # Test 26: Boolean mode - optional + excluded with multiple optionals
 select id, title from articles where match(title) against('tutorial PostgreSQL -Security' in boolean mode);
 
+# Test 27: Natural language mode - punctuation attached to tokens is stripped
+select id, title from articles where match(title) against('MySQL, PostgreSQL.');
+
+# Test 28: Boolean mode - MySQL relevance modifiers > < treated as optional
+select id, title from articles where match(title) against('>MySQL <Security' in boolean mode);
+
+# Test 29: AGAINST(NULL) returns no matches
+select id, title from articles where match(title) against(NULL);
+
 # Cleanup
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

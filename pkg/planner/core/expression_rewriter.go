@@ -2447,6 +2447,16 @@ func (er *expressionRewriter) matchAgainstToLike(v *ast.MatchAgainst, numCols, s
 		return
 	}
 
+	if searchText.IsNull() {
+		// NULL search string matches nothing, consistent with native FTS behavior.
+		er.ctxStackPop(numCols + 1)
+		er.ctxStackAppend(&expression.Constant{
+			Value:   types.NewIntDatum(0),
+			RetType: types.NewFieldType(mysql.TypeTiny),
+		}, types.EmptyName)
+		return
+	}
+
 	if searchText.Kind() != types.KindString {
 		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST with non-string search expression")
 		return

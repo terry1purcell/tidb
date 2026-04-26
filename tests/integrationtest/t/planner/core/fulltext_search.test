@@ -110,6 +110,12 @@ select id, title from articles where match(title) against('-"MySQL Tutorial"' in
 # Test 24: Boolean mode - mix of required/excluded phrases and words
 select id, title from articles where match(title) against('+MySQL +"How To" -PostgreSQL' in boolean mode);
 
+# Test 25: Boolean mode - optional + excluded (optional treated as required filter)
+select id, title from articles where match(title) against('tutorial -Security' in boolean mode);
+
+# Test 26: Boolean mode - optional + excluded with multiple optionals
+select id, title from articles where match(title) against('tutorial PostgreSQL -Security' in boolean mode);
+
 # Cleanup
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

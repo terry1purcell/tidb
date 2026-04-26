@@ -271,10 +271,13 @@ func (er *expressionRewriter) convertMatchAgainstToLike(
 			}
 		}
 
-		// For optional terms:
-		// - If there are required/excluded terms, ignore optional terms (we can't rank in LIKE fallback)
-		// - If there are ONLY optional terms, require at least one to match
-		if len(optional) > 0 && len(required) == 0 && len(excluded) == 0 {
+		// For optional terms: since LIKE cannot rank, treat optionals as a
+		// positive filter when no required terms exist.
+		// - required>0: ignore optionals (required terms already anchor the result)
+		// - required==0, excluded==0: at least one optional must match (pure optional query)
+		// - required==0, excluded>0: at least one optional must match AND excluded terms
+		//   must be absent; AND the optional-DNF into allPredicates below
+		if len(optional) > 0 && len(required) == 0 {
 			var allOptionalPreds []expression.Expression
 			for _, term := range optional {
 				for _, column := range columns {
@@ -286,8 +289,14 @@ func (er *expressionRewriter) convertMatchAgainstToLike(
 				}
 			}
 			if len(allOptionalPreds) > 0 {
-				// When there are only optional terms, at least one must match
-				return expression.ComposeDNFCondition(er.sctx, allOptionalPreds...), nil
+				optionalDNF := expression.ComposeDNFCondition(er.sctx, allOptionalPreds...)
+				if len(excluded) == 0 {
+					// Pure optional query: return the DNF directly.
+					return optionalDNF, nil
+				}
+				// Optional + excluded: fold optional requirement into allPredicates
+				// so it is AND-ed with the NOT-exclusion predicates below.
+				allPredicates = append(allPredicates, optionalDNF)
 			}
 		}
 

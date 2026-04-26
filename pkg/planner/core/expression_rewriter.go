@@ -2379,6 +2379,10 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 	// LIKE predicates as a fallback that always works without TiFlash. When
 	// disabled, convert to the native FTSMysqlMatchAgainst builtin which can
 	// be pushed down to TiFlash for execution against fulltext indexes.
+	//
+	// Limitation: the LIKE fallback applies in all expression contexts, including
+	// SELECT/ORDER BY scoring uses. In those contexts MySQL returns a float
+	// relevance score, but the fallback returns 1 (matched) or 0 (not matched).
 	useLikeFallback := false
 	if er.planCtx != nil && er.planCtx.builder != nil && er.planCtx.builder.ctx != nil {
 		sessVars := er.planCtx.builder.ctx.GetSessionVars()
@@ -2431,6 +2435,11 @@ func (er *expressionRewriter) matchAgainstToLike(v *ast.MatchAgainst, numCols, s
 		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST with non-constant search string")
 		return
 	}
+
+	// The search string is baked into LIKE pattern constants at plan-build time.
+	// A cached plan would reuse the first execution's patterns for all subsequent
+	// executions, producing wrong results. Mark the plan as non-cacheable.
+	er.sctx.SetSkipPlanCache("MATCH...AGAINST LIKE fallback bakes search string into plan constants")
 
 	searchText, err := constExpr.Eval(er.sctx.GetEvalCtx(), chunk.Row{})
 	if err != nil {

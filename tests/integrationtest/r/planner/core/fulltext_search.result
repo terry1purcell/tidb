@@ -82,9 +82,6 @@ id	content
 drop table if exists special_chars;
 select id, title from articles where match(title) against('-PostgreSQL -Security' in boolean mode);
 id	title
-1	MySQL Tutorial
-2	How To Use MySQL Well
-3	Optimizing MySQL
 select id, title from articles where match(title) against('"MySQL tutorial' in boolean mode);
 id	title
 select id, title from articles where match(title) against('+MySQL	+tutorial
@@ -122,10 +119,6 @@ id	title
 1	MySQL Tutorial
 select id, title from articles where match(title) against('-"MySQL Tutorial"' in boolean mode);
 id	title
-2	How To Use MySQL Well
-3	Optimizing MySQL
-4	MySQL vs. PostgreSQL
-5	MySQL Security
 select id, title from articles where match(title) against('+MySQL +"How To" -PostgreSQL' in boolean mode);
 id	title
 2	How To Use MySQL Well

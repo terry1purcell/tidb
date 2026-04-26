@@ -482,6 +482,10 @@ type StatementContext struct {
 	// logical build round produced an order-aware join reorder candidate that is
 	// worth exploring in a dedicated alternative round.
 	AlternativeLogicalPlanOrderAwareJoinReorder bool
+	// AlternativeLogicalPlanPreferCorrelate indicates whether the current logical
+	// build round encountered a non-correlated IN subquery eligible for the
+	// correlate-to-Apply alternative.
+	AlternativeLogicalPlanPreferCorrelate bool
 	// AlternativeLogicalPlanFTSLikeFallback is a mode flag set before the
 	// first build round when alternative logical plans are enabled. When true,
 	// the expression rewriter converts MATCH...AGAINST to LIKE predicates

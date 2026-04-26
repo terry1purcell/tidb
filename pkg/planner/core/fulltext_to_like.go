@@ -217,6 +217,17 @@ func (er *expressionRewriter) convertMatchAgainstToLike(
 			}
 		}
 
+		// MySQL Boolean mode: a query with only excluded terms ("-a -b") returns
+		// an empty result set. The LIKE fallback must match this: when there are
+		// no required and no optional terms, no row can possibly satisfy the
+		// search, so return a constant FALSE immediately.
+		if len(required) == 0 && len(optional) == 0 && len(excluded) > 0 {
+			return &expression.Constant{
+				Value:   types.NewIntDatum(0),
+				RetType: types.NewFieldType(mysql.TypeTiny),
+			}, nil
+		}
+
 		// Build predicates with correct Boolean logic for multiple columns
 		// In MySQL, MATCH(col1, col2) AGAINST('+word1 +word2') means:
 		// - word1 must appear in (col1 OR col2)

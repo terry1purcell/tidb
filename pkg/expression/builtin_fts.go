@@ -87,8 +87,8 @@ func (c *ftsMatchWordFunctionClass) getFunction(ctx BuildContext, args []Express
 	if !ok {
 		return nil, ErrNotSupportedYet.GenWithStackByArgs("match against a non-constant string")
 	}
-	if argAgainstConstant.Value.Kind() != types.KindString && !argAgainstConstant.Value.IsNull() {
-		return nil, ErrNotSupportedYet.GenWithStackByArgs("match against a non-string constant")
+	if argAgainstConstant.Value.Kind() != types.KindString {
+		return nil, ErrNotSupportedYet.GenWithStackByArgs("match against a non-constant string")
 	}
 	argsMatch := args[1:]
 	for _, arg := range argsMatch {
@@ -99,13 +99,7 @@ func (c *ftsMatchWordFunctionClass) getFunction(ctx BuildContext, args []Express
 	}
 
 	argTps := make([]types.EvalType, 0, len(args))
-	argTps = append(argTps, types.ETString)
-	for _, arg := range argsMatch {
-		if arg.GetType(ctx.GetEvalCtx()).EvalType() != types.ETString {
-			return nil, ErrNotSupportedYet.GenWithStackByArgs("Doesn't support match search on a non-string column without fulltext index")
-		}
-		argTps = append(argTps, types.ETString)
-	}
+	argTps = append(argTps, types.ETString, types.ETString)
 
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETReal, argTps...)
 	if err != nil {
@@ -118,9 +112,7 @@ func (c *ftsMatchWordFunctionClass) getFunction(ctx BuildContext, args []Express
 }
 
 func (b *builtinFtsMatchWordSig) evalReal(ctx EvalContext, row chunk.Row) (float64, bool, error) {
-	if b.args[0].(*Constant).Value.IsNull() {
-		return 0, false, nil
-	}
+	// Reject executing match against in TiDB side.
 	return 0, false, errors.Errorf("cannot use 'FTS_MATCH_WORD()' outside of fulltext index")
 }
 

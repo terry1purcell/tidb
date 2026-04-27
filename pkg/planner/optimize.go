@@ -676,9 +676,11 @@ func optimize(ctx context.Context, sctx planctx.PlanContext, node *resolve.NodeW
 	if needRestoreLogicalPlanCtx {
 		initialLogicalPlanCtx = saveLogicalPlanBuildCtx(sessVars)
 		sessVars.StmtCtx.ResetAlternativeLogicalPlanSignals()
-		// Enable LIKE fallback for MATCH...AGAINST in the first round so the
-		// first plan is always executable. The FTS native path is explored as
-		// an alternative round that may win on cost when TiFlash is available.
+		// Enable LIKE fallback for MATCH...AGAINST whenever alternative logical
+		// plans are active. The flag is set here (before the first round) and
+		// stays set for any subsequent alternative rounds, so all rounds produce
+		// an executable LIKE-based plan. The native FTS builtin path (TiFlash)
+		// is used only when alternative logical plans are disabled.
 		sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback = true
 	}
 

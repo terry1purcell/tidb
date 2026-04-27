@@ -631,6 +631,23 @@ var alternativeRounds = [...]alternativeRound{
 			sv.EnableCorrelateSubquery = savedEnableCorrelateSubquery
 		},
 	},
+	{
+		// fts-native: rebuild the plan using the native FTSMysqlMatchAgainst
+		// builtin so TiFlash FTS can compete on cost against the first round's
+		// ILIKE-based plan. Only enabled when the first round detected that the
+		// matched columns' table has TiFlash replicas — without TiFlash the native
+		// builtin can't be pushed down and would error at execution time.
+		name: "fts-native",
+		enabled: func(sv *variable.SessionVars) bool {
+			return sv.EnableAlternativeLogicalPlans && sv.StmtCtx.AlternativeLogicalPlanHasFTSWithTiFlash
+		},
+		setup: func(sv *variable.SessionVars) {
+			sv.StmtCtx.AlternativeLogicalPlanFTSLikeFallback = false
+		},
+		cleanup: func(sv *variable.SessionVars) {
+			sv.StmtCtx.AlternativeLogicalPlanFTSLikeFallback = true
+		},
+	},
 }
 
 func optimize(ctx context.Context, sctx planctx.PlanContext, node *resolve.NodeW, is infoschema.InfoSchema) (base.Plan, types.NameSlice, float64, error) {

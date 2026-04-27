@@ -2377,21 +2377,33 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 
 	// When alternative logical plans are enabled, AlternativeLogicalPlanFTSLikeFallback
 	// is set before the first build round and the expression rewriter converts
-	// MATCH...AGAINST to LIKE predicates — but ONLY in filter/predicate clauses
+	// MATCH...AGAINST to ILIKE predicates — but ONLY in filter/predicate clauses
 	// (WHERE, HAVING, JOIN ON). In scoring contexts (SELECT field list, ORDER BY)
-	// the result must be a float relevance score; the 0/1 LIKE result would be
+	// the result must be a float relevance score; the 0/1 ILIKE result would be
 	// semantically wrong and silently corrupt ORDER BY MATCH(...) DESC results.
 	// Those contexts always use the native FTSMysqlMatchAgainst builtin.
+	//
+	// When this is the first (ILIKE) round and the matched columns' table has
+	// TiFlash replicas, the HasFTSWithTiFlash signal is set so the "fts-native"
+	// alternative round is triggered. That round rebuilds the plan with the native
+	// builtin everywhere so TiFlash FTS can compete on cost.
 	useLikeFallback := false
 	if er.planCtx != nil && er.planCtx.builder != nil && er.planCtx.builder.ctx != nil {
 		sessVars := er.planCtx.builder.ctx.GetSessionVars()
 		if sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback {
-			// Only rewrite to LIKE in predicate (filter) clauses.
+			// Only rewrite to ILIKE in predicate (filter) clauses.
 			// SELECT field list and ORDER BY expect a float relevance score;
-			// the 0/1 LIKE result must not substitute it.
+			// the 0/1 ILIKE result must not substitute it.
 			switch er.planCtx.builder.curClause {
 			case whereClause, havingClause, onClause:
 				useLikeFallback = true
+			}
+
+			// Check if any matched column's table has TiFlash replicas. If so,
+			// signal the "fts-native" alternative round to try the native FTS
+			// builtin pushed to TiFlash, which may win on cost.
+			if !sessVars.StmtCtx.AlternativeLogicalPlanHasFTSWithTiFlash {
+				er.checkFTSTiFlashAvailability(v, sessVars)
 			}
 		}
 	}
@@ -2400,6 +2412,31 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 		er.matchAgainstToLike(v, numCols, stackLen)
 	} else {
 		er.matchAgainstToBuiltin(v, numCols, stackLen)
+	}
+}
+
+// checkFTSTiFlashAvailability checks whether any of the matched columns' tables
+// have TiFlash replicas. If so, it sets AlternativeLogicalPlanHasFTSWithTiFlash
+// to trigger the "fts-native" alternative round.
+func (er *expressionRewriter) checkFTSTiFlashAvailability(v *ast.MatchAgainst, sessVars *variable.SessionVars) {
+	builder := er.planCtx.builder
+	for _, col := range v.ColumnNames {
+		dbName := col.Schema
+		if dbName.L == "" {
+			dbName = ast.NewCIStr(sessVars.CurrentDB)
+		}
+		tblName := col.Table
+		if tblName.L == "" {
+			continue
+		}
+		tblInfo, err := builder.is.TableInfoByName(dbName, tblName)
+		if err != nil {
+			continue
+		}
+		if tblInfo.TiFlashReplica != nil && tblInfo.TiFlashReplica.Available && tblInfo.TiFlashReplica.Count > 0 {
+			sessVars.StmtCtx.AlternativeLogicalPlanHasFTSWithTiFlash = true
+			return
+		}
 	}
 }
 

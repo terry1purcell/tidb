@@ -491,6 +491,12 @@ type StatementContext struct {
 	// the expression rewriter converts MATCH...AGAINST to LIKE predicates
 	// (predicate contexts only) instead of the native FTSMysqlMatchAgainst builtin.
 	AlternativeLogicalPlanFTSLikeFallback bool
+	// AlternativeLogicalPlanHasFTSWithTiFlash is set during the first (ILIKE)
+	// build round when a MATCH...AGAINST expression is encountered AND the
+	// matched columns' table has TiFlash replicas. This triggers the "fts-native"
+	// alternative round so the native FTS builtin (pushed to TiFlash) can compete
+	// on cost against the ILIKE plan.
+	AlternativeLogicalPlanHasFTSWithTiFlash bool
 
 	// IsExplainAnalyzeDML is true if the statement is "explain analyze DML executors", before responding the explain
 	// results to the client, the transaction should be committed first. See issue #37373 for more details.
@@ -671,6 +677,7 @@ func (sc *StatementContext) ResetAlternativeLogicalPlanSignals() {
 	sc.AlternativeLogicalPlanSameOrderIndexJoin = false
 	sc.AlternativeLogicalPlanOrderAwareJoinReorder = false
 	sc.AlternativeLogicalPlanFTSLikeFallback = false
+	sc.AlternativeLogicalPlanHasFTSWithTiFlash = false
 	sc.AlternativeLogicalPlanPreferCorrelate = false
 }
 

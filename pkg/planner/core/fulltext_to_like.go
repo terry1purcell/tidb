@@ -141,8 +141,10 @@ func parseSearchTerm(word string) searchTerm {
 		word = word[1:]
 	}
 
-	// Strip MySQL relevance modifiers > and < (treat as optional in LIKE fallback)
-	if len(word) > 0 && (word[0] == '>' || word[0] == '<') {
+	// Strip MySQL relevance modifiers >, <, ~ (treat term as optional in LIKE fallback).
+	// ~ in MySQL Boolean FTS decreases the relevance of a term without excluding it;
+	// >, < adjust the relevance contribution. All three map to "optional" here.
+	if len(word) > 0 && (word[0] == '>' || word[0] == '<' || word[0] == '~') {
 		word = word[1:]
 	}
 
@@ -185,7 +187,10 @@ func isWordByte(c byte) bool {
 // It provides basic text matching capabilities but has the following semantic differences
 // from MySQL's full-text search:
 //
-// 1. No relevance scoring - returns 1 for match, 0 for no match (MySQL returns a relevance score)
+// 1. No relevance scoring — returns 1 (match) or 0 (no match) in all expression contexts.
+//    Queries using MATCH...AGAINST for relevance ranking (ORDER BY MATCH(...) DESC, or
+//    scalar SELECT MATCH(...)) will get 0/1 integer results instead of float relevance scores.
+//    This is a fundamental limitation of the LIKE-based approximation.
 // 2. No stop word filtering - searches for all words regardless of length or commonness
 // 3. No word length limits - MySQL ignores words shorter than ft_min_word_len (default 4)
 // 4. No word boundaries - LIKE %term% matches substrings anywhere, not just complete words
@@ -201,7 +206,8 @@ func isWordByte(c byte) bool {
 // 6. Performance - LIKE predicates cannot use full-text indexes (much slower on large datasets)
 //
 // Supported Boolean mode operators: + (required), - (excluded), * (prefix wildcard), "..." (phrase)
-// Unsupported operators: ~ (negation with ranking), > < (relevance modifiers), () (grouping)
+// Partially supported: ~ (treated as optional, ranking effect ignored), > < (treated as optional)
+// Unsupported: WITH QUERY EXPANSION (returns an error), () sub-expression grouping (stripped)
 func (er *expressionRewriter) convertMatchAgainstToLike(
 	columns []expression.Expression,
 	searchText string,
@@ -209,6 +215,13 @@ func (er *expressionRewriter) convertMatchAgainstToLike(
 ) (expression.Expression, error) {
 	if len(columns) == 0 {
 		return nil, expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST with no columns")
+	}
+
+	// WITH QUERY EXPANSION requires a second FTS pass to find semantically related
+	// terms; LIKE cannot approximate this. Error explicitly rather than silently
+	// producing wrong results.
+	if modifier.WithQueryExpansion() {
+		return nil, expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST WITH QUERY EXPANSION is not supported in the LIKE fallback")
 	}
 
 	if searchText == "" {

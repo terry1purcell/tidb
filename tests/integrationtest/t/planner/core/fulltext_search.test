@@ -125,6 +125,13 @@ select id, title from articles where match(title) against('>MySQL <Security' in 
 # Test 29: AGAINST(NULL) returns no matches
 select id, title from articles where match(title) against(NULL);
 
+# Test 30: Boolean mode - ~ (negation ranking) treated as optional term
+select id, title from articles where match(title) against('~Security ~PostgreSQL' in boolean mode);
+
+# Test 31: WITH QUERY EXPANSION is not supported in the LIKE fallback
+-- error 1235
+select id, title from articles where match(title) against('MySQL' with query expansion);
+
 # Cleanup
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

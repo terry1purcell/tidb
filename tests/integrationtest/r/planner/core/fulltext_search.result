@@ -143,5 +143,11 @@ id	title
 5	MySQL Security
 select id, title from articles where match(title) against(NULL);
 id	title
+select id, title from articles where match(title) against('~Security ~PostgreSQL' in boolean mode);
+id	title
+4	MySQL vs. PostgreSQL
+5	MySQL Security
+select id, title from articles where match(title) against('MySQL' with query expansion);
+Error 1235 (42000): This version of TiDB doesn't yet support 'MATCH...AGAINST WITH QUERY EXPANSION is not supported in the LIKE fallback'
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

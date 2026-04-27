@@ -2464,7 +2464,12 @@ func (er *expressionRewriter) matchAgainstToLike(v *ast.MatchAgainst, numCols, s
 
 	columns := make([]expression.Expression, numCols)
 	for i := range numCols {
-		columns[i] = er.ctxStack[stackLen-numCols-1+i]
+		col := er.ctxStack[stackLen-numCols-1+i]
+		if col.GetType(er.sctx.GetEvalCtx()).EvalType() != types.ETString {
+			er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("Doesn't support match search on a non-string column without fulltext index")
+			return
+		}
+		columns[i] = col
 	}
 
 	er.ctxStackPop(numCols + 1)

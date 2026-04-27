@@ -190,18 +190,18 @@ func isWordByte(c byte) bool {
 // It provides basic text matching capabilities but has the following semantic differences
 // from MySQL's full-text search:
 //
-// 1. No relevance scoring — returns 1 (match) or 0 (no match) in all expression contexts.
-//    Queries using MATCH...AGAINST for relevance ranking (ORDER BY MATCH(...) DESC, or
-//    scalar SELECT MATCH(...)) will get 0/1 integer results instead of float relevance scores.
-//    This is a fundamental limitation of the LIKE-based approximation.
-// 2. No stop word filtering - searches for all words regardless of length or commonness
-// 3. No word length limits - MySQL ignores words shorter than ft_min_word_len (default 4)
-// 4. No word boundaries - LIKE %term% matches substrings anywhere, not just complete words
-//   - Simple terms: "cat" matches "concatenate", "category", "application"
+//  1. No relevance scoring — returns 1 (match) or 0 (no match) in all expression contexts.
+//     Queries using MATCH...AGAINST for relevance ranking (ORDER BY MATCH(...) DESC, or
+//     scalar SELECT MATCH(...)) will get 0/1 integer results instead of float relevance scores.
+//     This is a fundamental limitation of the LIKE-based approximation.
+//  2. No stop word filtering - searches for all words regardless of length or commonness
+//  3. No word length limits - MySQL ignores words shorter than ft_min_word_len (default 4)
+//  4. No word boundaries - LIKE %term% matches substrings anywhere, not just complete words
+//     - Simple terms: "cat" matches "concatenate", "category", "application"
 //     (MySQL FTS only matches "cat" as a standalone word)
-//   - Prefix wildcard: "Optim*" matches "reOptimizing", "Optimizing"
+//     - Prefix wildcard: "Optim*" matches "reOptimizing", "Optimizing"
 //     (MySQL FTS only matches words starting with "Optim" like "Optimizing", not "reOptimizing")
-//   - Phrase matching: "quick brown" matches "aquick brownie"
+//     - Phrase matching: "quick brown" matches "aquick brownie"
 //     (MySQL FTS only matches the exact phrase with word boundaries)
 //     This limitation exists because LIKE cannot enforce word boundaries without REGEXP
 //

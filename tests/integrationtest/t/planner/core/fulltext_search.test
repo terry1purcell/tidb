@@ -140,6 +140,16 @@ select id, match(title) against('MySQL') as score from articles;
 -- error 1105
 select id, title from articles order by match(title) against('MySQL') desc;
 
+# Test 34: MATCH in HAVING clause (predicate context - LIKE fallback applies)
+select id, title from articles group by id, title having match(title) against('PostgreSQL');
+
+# Test 35: MATCH in JOIN ON clause (predicate context - LIKE fallback applies)
+select a.id, a.title from articles a inner join articles a2 on a.id = a2.id and match(a.title) against('Security');
+
+# Test 36: MATCH on non-string column errors
+-- error 1235
+select id from articles where match(id) against('MySQL');
+
 # Cleanup
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

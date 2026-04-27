@@ -24,9 +24,9 @@ id	title
 5	MySQL Security
 select id, title from articles where match(title) against('+MySQL +tutorial' in boolean mode);
 id	title
+1	MySQL Tutorial
 select id, title from articles where match(title) against('+MySQL -tutorial' in boolean mode);
 id	title
-1	MySQL Tutorial
 2	How To Use MySQL Well
 3	Optimizing MySQL
 4	MySQL vs. PostgreSQL
@@ -43,6 +43,8 @@ id	title
 5	MySQL Security
 select id, title from articles where match(title) against('tutorial security' in boolean mode);
 id	title
+1	MySQL Tutorial
+5	MySQL Security
 select id, title from articles where match(title) against('');
 id	title
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
@@ -84,9 +86,11 @@ select id, title from articles where match(title) against('-PostgreSQL -Security
 id	title
 select id, title from articles where match(title) against('"MySQL tutorial' in boolean mode);
 id	title
+1	MySQL Tutorial
 select id, title from articles where match(title) against('+MySQL	+tutorial
 -Security' in boolean mode);
 id	title
+1	MySQL Tutorial
 select id, title from articles where match(title) against('+MySQL +* tutorial' in boolean mode);
 id	title
 1	MySQL Tutorial
@@ -124,8 +128,10 @@ id	title
 2	How To Use MySQL Well
 select id, title from articles where match(title) against('tutorial -Security' in boolean mode);
 id	title
+1	MySQL Tutorial
 select id, title from articles where match(title) against('tutorial PostgreSQL -Security' in boolean mode);
 id	title
+1	MySQL Tutorial
 4	MySQL vs. PostgreSQL
 select id, title from articles where match(title) against('MySQL, PostgreSQL.');
 id	title
@@ -153,5 +159,13 @@ select id, match(title) against('MySQL') as score from articles;
 Error 1105 (HY000): cannot use 'MATCH ... AGAINST' outside of fulltext index
 select id, title from articles order by match(title) against('MySQL') desc;
 Error 1105 (HY000): cannot use 'MATCH ... AGAINST' outside of fulltext index
+select id, title from articles group by id, title having match(title) against('PostgreSQL');
+id	title
+4	MySQL vs. PostgreSQL
+select a.id, a.title from articles a inner join articles a2 on a.id = a2.id and match(a.title) against('Security');
+id	title
+5	MySQL Security
+select id from articles where match(id) against('MySQL');
+Error 1235 (42000): This version of TiDB doesn't yet support 'Doesn't support match search on a non-string column without fulltext index'
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

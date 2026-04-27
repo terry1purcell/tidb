@@ -177,6 +177,9 @@ func stripTokenPunctuation(word string) string {
 	return word[start:end]
 }
 
+// isWordByte returns true for alphanumeric ASCII and non-ASCII bytes.
+// Punctuation including underscore is NOT a word character, consistent with
+// MySQL's built-in FTS tokenizer which treats _ as a word separator.
 func isWordByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c > 127
 }
@@ -202,8 +205,7 @@ func isWordByte(c byte) bool {
 //     (MySQL FTS only matches the exact phrase with word boundaries)
 //     This limitation exists because LIKE cannot enforce word boundaries without REGEXP
 //
-// 5. Case sensitivity - follows column collation (MySQL full-text search is case-insensitive)
-// 6. Performance - LIKE predicates cannot use full-text indexes (much slower on large datasets)
+// 5. Performance - LIKE predicates cannot use full-text indexes (much slower on large datasets)
 //
 // Supported Boolean mode operators: + (required), - (excluded), * (prefix wildcard), "..." (phrase)
 // Partially supported: ~ (treated as optional, ranking effect ignored), > < (treated as optional)
@@ -447,8 +449,11 @@ func (er *expressionRewriter) buildLikePredicate(
 		RetType: types.NewFieldType(mysql.TypeTiny),
 	}
 
-	// Build LIKE function
-	likeFunc, err := er.newFunction(ast.Like, types.NewFieldType(mysql.TypeTiny), column, patternConst, escapeConst)
+	// Build ILIKE function (case-insensitive LIKE).
+	// MySQL full-text search is always case-insensitive regardless of column
+	// collation, so ILIKE matches that semantic rather than plain LIKE which
+	// would follow the column's collation (often utf8mb4_bin = case-sensitive).
+	likeFunc, err := er.newFunction(ast.Ilike, types.NewFieldType(mysql.TypeTiny), column, patternConst, escapeConst)
 	if err != nil {
 		return nil, err
 	}

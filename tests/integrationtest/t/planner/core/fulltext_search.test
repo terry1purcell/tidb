@@ -132,6 +132,14 @@ select id, title from articles where match(title) against('~Security ~PostgreSQL
 -- error 1235
 select id, title from articles where match(title) against('MySQL' with query expansion);
 
+# Test 32: MATCH in SELECT (scoring context) uses native FTS path, not LIKE; errors without TiFlash
+-- error 1105
+select id, match(title) against('MySQL') as score from articles;
+
+# Test 33: MATCH in ORDER BY (scoring context) uses native FTS path, not LIKE; errors without TiFlash
+-- error 1105
+select id, title from articles order by match(title) against('MySQL') desc;
+
 # Cleanup
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

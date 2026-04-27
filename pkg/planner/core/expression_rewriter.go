@@ -2375,18 +2375,25 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 		return
 	}
 
-	// When alternative logical plans are enabled, convert MATCH...AGAINST to
-	// LIKE predicates as a fallback that always works without TiFlash. When
-	// disabled, convert to the native FTSMysqlMatchAgainst builtin which can
-	// be pushed down to TiFlash for execution against fulltext indexes.
-	//
-	// Limitation: the LIKE fallback applies in all expression contexts, including
-	// SELECT/ORDER BY scoring uses. In those contexts MySQL returns a float
-	// relevance score, but the fallback returns 1 (matched) or 0 (not matched).
+	// When alternative logical plans are enabled, AlternativeLogicalPlanFTSLikeFallback
+	// is set before the first build round and the expression rewriter converts
+	// MATCH...AGAINST to LIKE predicates — but ONLY in filter/predicate clauses
+	// (WHERE, HAVING, JOIN ON). In scoring contexts (SELECT field list, ORDER BY)
+	// the result must be a float relevance score; the 0/1 LIKE result would be
+	// semantically wrong and silently corrupt ORDER BY MATCH(...) DESC results.
+	// Those contexts always use the native FTSMysqlMatchAgainst builtin.
 	useLikeFallback := false
 	if er.planCtx != nil && er.planCtx.builder != nil && er.planCtx.builder.ctx != nil {
 		sessVars := er.planCtx.builder.ctx.GetSessionVars()
-		useLikeFallback = sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback
+		if sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback {
+			// Only rewrite to LIKE in predicate (filter) clauses.
+			// SELECT field list and ORDER BY expect a float relevance score;
+			// the 0/1 LIKE result must not substitute it.
+			switch er.planCtx.builder.curClause {
+			case whereClause, havingClause, onClause:
+				useLikeFallback = true
+			}
+		}
 	}
 
 	if useLikeFallback {

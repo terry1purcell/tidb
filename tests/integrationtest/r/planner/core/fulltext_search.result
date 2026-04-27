@@ -149,5 +149,9 @@ id	title
 5	MySQL Security
 select id, title from articles where match(title) against('MySQL' with query expansion);
 Error 1235 (42000): This version of TiDB doesn't yet support 'MATCH...AGAINST WITH QUERY EXPANSION is not supported in the LIKE fallback'
+select id, match(title) against('MySQL') as score from articles;
+Error 1105 (HY000): cannot use 'MATCH ... AGAINST' outside of fulltext index
+select id, title from articles order by match(title) against('MySQL') desc;
+Error 1105 (HY000): cannot use 'MATCH ... AGAINST' outside of fulltext index
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

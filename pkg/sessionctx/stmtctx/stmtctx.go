@@ -489,7 +489,7 @@ type StatementContext struct {
 	// AlternativeLogicalPlanFTSLikeFallback is a mode flag set before the
 	// first build round when alternative logical plans are enabled. When true,
 	// the expression rewriter converts MATCH...AGAINST to LIKE predicates
-	// instead of the native FTSMysqlMatchAgainst builtin.
+	// (predicate contexts only) instead of the native FTSMysqlMatchAgainst builtin.
 	AlternativeLogicalPlanFTSLikeFallback bool
 
 	// IsExplainAnalyzeDML is true if the statement is "explain analyze DML executors", before responding the explain

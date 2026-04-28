@@ -813,10 +813,11 @@ func TestScanOnSmallTable(t *testing.T) {
 }
 
 func TestHashAggMemCostNotDividedByConcurrency(t *testing.T) {
-	// Verify that for high-NDV GROUP BY with an available index, the hash table
-	// memory cost is significant enough that StreamAgg (with ordered index scan)
-	// is cheaper than HashAgg. The memory cost must NOT be divided by concurrency
-	// since each parallel worker maintains its own hash table.
+	// Verify that for high-NDV GROUP BY with an available index on a table with
+	// wide rows, the hash table memory cost (placed outside /concurrency) is
+	// significant enough that StreamAgg (with ordered index scan and ~constant
+	// memory) is cheaper than HashAgg. This validates that hash table memory is
+	// not artificially discounted by parallelism.
 	testkit.RunTestUnderCascadesWithDomain(t, func(t *testing.T, tk *testkit.TestKit, dom *domain.Domain, cascades, caller string) {
 		store := tk.Session().GetStore()
 		defer func() {
@@ -828,7 +829,10 @@ func TestHashAggMemCostNotDividedByConcurrency(t *testing.T) {
 
 		tk.MustExec("use test")
 		tk.MustExec("drop table if exists t_high_ndv")
-		tk.MustExec("create table t_high_ndv (a int, b int, key(b))")
+		// The hash table memory cost is based on outputRows * outputRowSize, so the
+		// SELECT must include wide output columns (not just count(*)) for memory to
+		// become the dominant factor in the cost model.
+		tk.MustExec("create table t_high_ndv (a int, b int, c varchar(200), d varchar(200), key(b))")
 
 		// Insert rows where every b value is unique (100% NDV).
 		var buf strings.Builder
@@ -837,24 +841,28 @@ func TestHashAggMemCostNotDividedByConcurrency(t *testing.T) {
 			if i > 0 {
 				buf.WriteString(",")
 			}
-			buf.WriteString(fmt.Sprintf("(%d,%d)", i, i))
+			buf.WriteString(fmt.Sprintf("(%d,%d,'%s','%s')", i, i, "padding-data-for-wide-rows", "more-padding-data-here"))
 		}
 		tk.MustExec(buf.String())
 		tk.MustExec("analyze table t_high_ndv")
 
 		// With default cost factors, force both plans via hints and compare costs.
-		// StreamAgg on indexed input should be cheaper than HashAgg when NDV is high.
-		rs := tk.MustQuery("explain format=verbose select /*+ STREAM_AGG() */ b, count(*) from t_high_ndv use index(b) group by b").Rows()
+		// Including max(c), max(d) in the SELECT makes the output rows wide, which
+		// means the hash table (one per partial worker) consumes significant memory.
+		// StreamAgg on indexed input should be cheaper than HashAgg in this scenario.
+		q := "select b, count(*), max(c), max(d) from t_high_ndv use index(b) group by b"
+		rs := tk.MustQuery("explain format=verbose select /*+ STREAM_AGG() */ " + q[len("select "):]).Rows()
 		streamCost, err := strconv.ParseFloat(rs[0][2].(string), 64)
 		require.NoError(t, err)
 
-		rs = tk.MustQuery("explain format=verbose select /*+ HASH_AGG() */ b, count(*) from t_high_ndv use index(b) group by b").Rows()
+		rs = tk.MustQuery("explain format=verbose select /*+ HASH_AGG() */ " + q[len("select "):]).Rows()
 		hashCost, err := strconv.ParseFloat(rs[0][2].(string), 64)
 		require.NoError(t, err)
 
-		// StreamAgg should be cheaper than HashAgg for high-NDV GROUP BY with index.
+		// StreamAgg should be cheaper than HashAgg for high-NDV GROUP BY with wide
+		// output rows and an available index.
 		require.Less(t, streamCost, hashCost,
-			"StreamAgg (cost=%.2f) should be cheaper than HashAgg (cost=%.2f) for high-NDV GROUP BY with index",
+			"StreamAgg (cost=%.2f) should be cheaper than HashAgg (cost=%.2f) for high-NDV GROUP BY with wide output and index",
 			streamCost, hashCost)
 	})
 }

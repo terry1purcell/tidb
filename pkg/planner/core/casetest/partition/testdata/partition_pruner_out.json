@@ -279,17 +279,17 @@
         "Plan": [
           "Projection root  Column",
           "└─Sort root  test_partition.t1.id, test_partition.t1.a",
-          "  └─StreamAgg root  funcs:count(Column)->Column, funcs:firstrow(Column)->test_partition.t1.id, funcs:firstrow(Column)->test_partition.t1.a",
-          "    └─TableReader root partition:all data:StreamAgg",
-          "      └─StreamAgg cop[tikv]  funcs:count(1)->Column, funcs:firstrow(test_partition.t1.id)->Column, funcs:firstrow(test_partition.t1.a)->Column",
+          "  └─HashAgg root  funcs:count(Column)->Column, funcs:firstrow(Column)->test_partition.t1.id, funcs:firstrow(Column)->test_partition.t1.a",
+          "    └─TableReader root partition:all data:HashAgg",
+          "      └─HashAgg cop[tikv]  funcs:count(1)->Column, funcs:firstrow(test_partition.t1.id)->Column, funcs:firstrow(test_partition.t1.a)->Column",
           "        └─TableFullScan cop[tikv] table:t1 keep order:false, stats:pseudo"
         ],
         "IndexPlan": [
           "Projection root  Column",
           "└─Sort root  test_partition_1.t1.id, test_partition_1.t1.a",
-          "  └─StreamAgg root  funcs:count(Column)->Column, funcs:firstrow(Column)->test_partition_1.t1.id, funcs:firstrow(Column)->test_partition_1.t1.a",
-          "    └─IndexReader root partition:all index:StreamAgg",
-          "      └─StreamAgg cop[tikv]  funcs:count(1)->Column, funcs:firstrow(test_partition_1.t1.id)->Column, funcs:firstrow(test_partition_1.t1.a)->Column",
+          "  └─HashAgg root  funcs:count(Column)->Column, funcs:firstrow(Column)->test_partition_1.t1.id, funcs:firstrow(Column)->test_partition_1.t1.a",
+          "    └─IndexReader root partition:all index:HashAgg",
+          "      └─HashAgg cop[tikv]  funcs:count(1)->Column, funcs:firstrow(test_partition_1.t1.id)->Column, funcs:firstrow(test_partition_1.t1.a)->Column",
           "        └─IndexFullScan cop[tikv] table:t1, index:a(a, b, id) keep order:false, stats:pseudo"
         ]
       },
@@ -1323,16 +1323,16 @@
           "1"
         ],
         "Plan": [
-          "StreamAgg root  funcs:count(Column)->Column",
-          "└─TableReader root partition:p0 data:StreamAgg",
-          "  └─StreamAgg cop[tikv]  funcs:count(1)->Column",
+          "HashAgg root  funcs:count(Column)->Column",
+          "└─TableReader root partition:p0 data:HashAgg",
+          "  └─HashAgg cop[tikv]  funcs:count(1)->Column",
           "    └─Selection cop[tikv]  or(lt(test_partition.t1.a, 1), lt(test_partition.t1.b, 2))",
           "      └─TableFullScan cop[tikv] table:t1 keep order:false, stats:pseudo"
         ],
         "IndexPlan": [
-          "StreamAgg root  funcs:count(Column)->Column",
-          "└─IndexReader root partition:p0 index:StreamAgg",
-          "  └─StreamAgg cop[tikv]  funcs:count(1)->Column",
+          "HashAgg root  funcs:count(Column)->Column",
+          "└─IndexReader root partition:p0 index:HashAgg",
+          "  └─HashAgg cop[tikv]  funcs:count(1)->Column",
           "    └─Selection cop[tikv]  or(lt(test_partition_1.t1.a, 1), lt(test_partition_1.t1.b, 2))",
           "      └─IndexFullScan cop[tikv] table:t1, index:a(a, b, id) keep order:false, stats:pseudo"
         ]

@@ -629,9 +629,11 @@ func getPlanCostVer24PhysicalStreamAgg(pp base.PhysicalPlan, taskType property.T
 // across partial workers that each process a disjoint subset of input rows, so these
 // costs are divided by concurrency. However, the hash table memory cost is placed outside
 // the division: each partial worker maintains its own hash table, so total memory
-// consumption scales with outputRows (NDV) regardless of concurrency. For high-NDV
-// GROUP BY with an available ordered index, this memory penalty makes StreamAgg
-// (which uses ~constant memory) the preferred plan.
+// consumption is bounded by min(concurrency*outputRows, inputRows) — concurrency*outputRows
+// when groups are widely shared across workers, and inputRows when each row produces a
+// distinct group (so per-worker tables hold inputRows/concurrency entries each, summing to
+// inputRows total). For high-NDV GROUP BY with an available ordered index, this memory
+// penalty makes StreamAgg (which uses ~constant memory) the preferred plan.
 //
 // For TiFlash MPP and TiKV cop tasks, data is either partitioned across nodes (MPP) or
 // processed single-threaded on TiKV (cop). All costs use the original formula:
@@ -667,16 +669,20 @@ func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.Tas
 		// Root (TiDB) tasks: partial workers each process a disjoint subset of input
 		// rows, so all CPU work (agg, group, hash key, probe) is genuinely parallelized
 		// and divided by concurrency. However, each partial worker maintains its own
-		// hash table, so total memory scales with the number of workers. We model this
-		// as concurrency * outputRows * rowSize * memFactor, placed outside the
-		// concurrency division. For high-NDV GROUP BY (where outputRows ≈ inputRows),
-		// this makes memory the dominant cost and steers the optimizer toward StreamAgg
-		// when an ordered index is available. For low-NDV or no-GROUP-BY cases (where
-		// outputRows is small), the penalty is negligible.
+		// hash table. The total number of entries across all worker hash tables is
+		// bounded by min(concurrency*outputRows, inputRows): when groups are widely
+		// shared across workers each table approaches outputRows entries, but when
+		// every row produces a distinct group each worker only sees inputRows/concurrency
+		// rows (and entries) so the sum cannot exceed inputRows. The cap matters most
+		// at high NDV — without it, concurrency*outputRows overcounts memory by up to a
+		// factor of concurrency and makes Sort+StreamAgg look artificially cheaper than
+		// HashAgg even when no free ordering is available. For low-NDV or no-GROUP-BY
+		// cases the cap doesn't bind and the penalty is negligible.
+		hashMemRows := math.Min(concurrency*outputRows, inputRows)
 		hashMemCost := costusage.NewCostVer2(option, memFactor,
-			concurrency*outputRows*outputRowSize*memFactor.Value,
+			hashMemRows*outputRowSize*memFactor.Value,
 			func() string {
-				return fmt.Sprintf("hashmem(%v*%v*%v*%v)", concurrency, outputRows, outputRowSize, memFactor)
+				return fmt.Sprintf("hashmem(min(%v*%v,%v)*%v*%v)", concurrency, outputRows, inputRows, outputRowSize, memFactor)
 			})
 		// hashBuildCost includes memory; subtract it out so we don't double-count.
 		// Recompute just the CPU portion of hash build (key computation + build).

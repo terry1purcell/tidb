@@ -621,7 +621,7 @@ func getPlanCostVer24PhysicalStreamAgg(pp base.PhysicalPlan, taskType property.T
 
 // getPlanCostVer24PhysicalHashAgg returns the plan-cost of this sub-plan.
 //
-// For TiDB root and TiKV cop tasks:
+// For TiDB root and TiKV cop tasks (non-TiFlash child):
 //
 //	plan-cost = child-cost + agg-cost + group-cost + (hash-build-cost + hash-probe-cost) / concurrency
 //
@@ -630,10 +630,11 @@ func getPlanCostVer24PhysicalStreamAgg(pp base.PhysicalPlan, taskType property.T
 // Only the hash table operations (build + probe) benefit from parallel execution.
 // This matches the hash join pattern where build-side work is placed outside /concurrency.
 //
-// For TiFlash MPP tasks, data is truly partitioned across nodes so each node handles a
-// disjoint subset of rows. All costs are divided by the MPP concurrency:
+// For TiFlash MPP tasks, or root tasks whose child is a TiFlash TableReader, data is
+// truly partitioned across nodes so each node handles a disjoint subset of rows.
+// All costs are divided by concurrency:
 //
-//	plan-cost = child-cost + (agg-cost + group-cost + hash-build-cost + hash-probe-cost) / mppConcurrency
+//	plan-cost = child-cost + (agg-cost + group-cost + hash-build-cost + hash-probe-cost) / concurrency
 func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.TaskType, option *costusage.PlanCostOption, isChildOfINL ...bool) (costusage.CostVer2, error) {
 	p := pp.(*physicalop.PhysicalHashAgg)
 	if p.PlanCostInit && !hasCostFlag(option.CostFlag, costusage.CostFlagRecalculate) {
@@ -660,10 +661,19 @@ func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.Tas
 		return costusage.ZeroCostVer2, err
 	}
 
-	if taskType == property.MppTaskType {
-		// MPP partitions data across TiFlash nodes: each node processes a disjoint shard,
-		// so all costs scale with concurrency. Preserve the original formula to avoid
-		// disrupting MPP plan choices calibrated against TiFlash's distributed execution model.
+	// Determine whether the child feeds data from TiFlash (e.g. a root HashAgg
+	// sitting on top of a TiFlash TableReader). In that case, preserve the original
+	// formula so we don't penalize TiFlash-backed plans relative to TiKV alternatives.
+	childIsTiFlash := false
+	if tr, ok := p.Children()[0].(*physicalop.PhysicalTableReader); ok && tr.StoreType == kv.TiFlash {
+		childIsTiFlash = true
+	}
+
+	if taskType == property.MppTaskType || childIsTiFlash {
+		// MPP tasks partition data across TiFlash nodes: each node processes a disjoint
+		// shard, so all costs scale with concurrency. Root HashAgg reading from TiFlash
+		// also uses the original formula — TiFlash has no ordered-index alternative, so
+		// penalizing root HashAgg here would incorrectly steer the optimizer toward TiKV.
 		p.PlanCostVer2 = costusage.SumCostVer2(startCost, childCost,
 			costusage.DivCostVer2(costusage.SumCostVer2(aggCost, groupCost, hashBuildCost, hashProbeCost), concurrency))
 	} else {

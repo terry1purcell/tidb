@@ -208,9 +208,9 @@ explain format="plan_tree" select b, avg(a) from t group by b order by b;
 id	task	access object	operator info
 Sort	root		planner__cascades__integration.t.b
 └─Projection	root		planner__cascades__integration.t.b, Column
-  └─HashAgg	root		group by:Column, funcs:avg(Column)->Column, funcs:firstrow(Column)->planner__cascades__integration.t.b
-    └─Projection	root		cast(planner__cascades__integration.t.a, decimal(10,0) BINARY)->Column, planner__cascades__integration.t.b->Column
-      └─TableReader	root		data:TableFullScan
+  └─HashAgg	root		group by:planner__cascades__integration.t.b, funcs:avg(Column, Column)->Column, funcs:firstrow(planner__cascades__integration.t.b)->planner__cascades__integration.t.b
+    └─TableReader	root		data:HashAgg
+      └─HashAgg	cop[tikv]		group by:planner__cascades__integration.t.b, funcs:count(planner__cascades__integration.t.a)->Column, funcs:sum(planner__cascades__integration.t.a)->Column
         └─TableFullScan	cop[tikv]	table:t	keep order:false, stats:pseudo
 select b, avg(a) from t group by b order by b;
 b	avg(a)

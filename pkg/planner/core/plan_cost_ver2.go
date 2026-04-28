@@ -621,7 +621,7 @@ func getPlanCostVer24PhysicalStreamAgg(pp base.PhysicalPlan, taskType property.T
 
 // getPlanCostVer24PhysicalHashAgg returns the plan-cost of this sub-plan.
 //
-// For TiDB root and TiKV cop tasks:
+// For TiDB root tasks:
 //
 //	plan-cost = child-cost + hash-mem-cost + (agg-cost + group-cost + hash-build-cpu-cost + hash-probe-cost) / concurrency
 //
@@ -633,10 +633,10 @@ func getPlanCostVer24PhysicalStreamAgg(pp base.PhysicalPlan, taskType property.T
 // GROUP BY with an available ordered index, this memory penalty makes StreamAgg
 // (which uses ~constant memory) the preferred plan.
 //
-// For TiFlash MPP tasks, data is truly partitioned across nodes so each node handles a
-// disjoint subset of rows. All costs are divided by the MPP concurrency:
+// For TiFlash MPP and TiKV cop tasks, data is either partitioned across nodes (MPP) or
+// processed single-threaded on TiKV (cop). All costs use the original formula:
 //
-//	plan-cost = child-cost + (agg-cost + group-cost + hash-build-cost + hash-probe-cost) / mppConcurrency
+//	plan-cost = child-cost + (agg-cost + group-cost + hash-build-cost + hash-probe-cost) / concurrency
 func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.TaskType, option *costusage.PlanCostOption, isChildOfINL ...bool) (costusage.CostVer2, error) {
 	p := pp.(*physicalop.PhysicalHashAgg)
 	if p.PlanCostInit && !hasCostFlag(option.CostFlag, costusage.CostFlagRecalculate) {
@@ -663,21 +663,16 @@ func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.Tas
 		return costusage.ZeroCostVer2, err
 	}
 
-	if taskType == property.MppTaskType {
-		// MPP partitions data across TiFlash nodes: each node processes a disjoint shard,
-		// so all costs scale with concurrency.
-		p.PlanCostVer2 = costusage.SumCostVer2(startCost, childCost,
-			costusage.DivCostVer2(costusage.SumCostVer2(aggCost, groupCost, hashBuildCost, hashProbeCost), concurrency))
-	} else {
-		// Root (TiDB) and cop (TiKV) tasks: partial workers each process a disjoint
-		// subset of input rows, so all CPU work (agg, group, hash key, probe) is
-		// genuinely parallelized and divided by concurrency. However, each partial
-		// worker maintains its own hash table, so total memory scales with the number
-		// of workers. We model this as concurrency * outputRows * rowSize * memFactor,
-		// placed outside the concurrency division. For high-NDV GROUP BY (where
-		// outputRows ≈ inputRows), this makes memory the dominant cost and steers the
-		// optimizer toward StreamAgg when an ordered index is available. For low-NDV
-		// or no-GROUP-BY cases (where outputRows is small), the penalty is negligible.
+	if taskType == property.RootTaskType {
+		// Root (TiDB) tasks: partial workers each process a disjoint subset of input
+		// rows, so all CPU work (agg, group, hash key, probe) is genuinely parallelized
+		// and divided by concurrency. However, each partial worker maintains its own
+		// hash table, so total memory scales with the number of workers. We model this
+		// as concurrency * outputRows * rowSize * memFactor, placed outside the
+		// concurrency division. For high-NDV GROUP BY (where outputRows ≈ inputRows),
+		// this makes memory the dominant cost and steers the optimizer toward StreamAgg
+		// when an ordered index is available. For low-NDV or no-GROUP-BY cases (where
+		// outputRows is small), the penalty is negligible.
 		hashMemCost := costusage.NewCostVer2(option, memFactor,
 			concurrency*outputRows*outputRowSize*memFactor.Value,
 			func() string {
@@ -693,6 +688,13 @@ func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.Tas
 			})
 		p.PlanCostVer2 = costusage.SumCostVer2(startCost, childCost, hashMemCost,
 			costusage.DivCostVer2(costusage.SumCostVer2(aggCost, groupCost, hashBuildCPUCost, hashProbeCost), concurrency))
+	} else {
+		// MPP and cop tasks: data is either partitioned (MPP) or processed by a single
+		// TiKV thread (cop), so the TiDB root concurrency factor does not apply.
+		// Use the original formula where all costs are divided by concurrency (for MPP)
+		// or treated as single-threaded work (for cop, where concurrency=1 effectively).
+		p.PlanCostVer2 = costusage.SumCostVer2(startCost, childCost,
+			costusage.DivCostVer2(costusage.SumCostVer2(aggCost, groupCost, hashBuildCost, hashProbeCost), concurrency))
 	}
 	p.PlanCostInit = true
 	// Multiply by cost factor - defaults to 1, but can be increased/decreased to influence the cost model

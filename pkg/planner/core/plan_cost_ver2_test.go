@@ -866,3 +866,56 @@ func TestHashAggMemCostNotDividedByConcurrency(t *testing.T) {
 			streamCost, hashCost)
 	})
 }
+
+func TestHashAggMemCostGatedOnFreeOrdering(t *testing.T) {
+	// Companion to TestHashAggMemCostNotDividedByConcurrency: verify that the
+	// HashAgg memory penalty is *not* applied when the GROUP BY is over a join
+	// output (no free ordering available). Without gating, the inflated penalty
+	// makes Sort+StreamAgg look cheaper than HashAgg even though paying for an
+	// explicit Sort over the join output is more expensive in practice.
+	testkit.RunTestUnderCascadesWithDomain(t, func(t *testing.T, tk *testkit.TestKit, dom *domain.Domain, cascades, caller string) {
+		store := tk.Session().GetStore()
+		defer func() {
+			tk2 := testkit.NewTestKit(t, store)
+			tk2.MustExec("use test")
+			tk2.MustExec("drop table if exists t_join_a, t_join_b")
+			dom.StatsHandle().Clear()
+		}()
+
+		tk.MustExec("use test")
+		tk.MustExec("drop table if exists t_join_a, t_join_b")
+		tk.MustExec("create table t_join_a (k int, v int, c varchar(200))")
+		tk.MustExec("create table t_join_b (k int, w int, d varchar(200))")
+		var bufA, bufB strings.Builder
+		bufA.WriteString("insert into t_join_a values ")
+		bufB.WriteString("insert into t_join_b values ")
+		for i := 0; i < 1000; i++ {
+			if i > 0 {
+				bufA.WriteString(",")
+				bufB.WriteString(",")
+			}
+			bufA.WriteString(fmt.Sprintf("(%d,%d,'padding-data-for-wide-rows')", i, i))
+			bufB.WriteString(fmt.Sprintf("(%d,%d,'more-padding-data-here')", i, i))
+		}
+		tk.MustExec(bufA.String())
+		tk.MustExec(bufB.String())
+		tk.MustExec("analyze table t_join_a")
+		tk.MustExec("analyze table t_join_b")
+
+		// GROUP BY over a hash-join output: no index can satisfy the order on the
+		// join result, so the StreamAgg alternative would need an explicit Sort.
+		q := "select t_join_a.v, max(t_join_a.c), max(t_join_b.d) from t_join_a join t_join_b on t_join_a.k = t_join_b.k group by t_join_a.v"
+		rs := tk.MustQuery("explain format=verbose select /*+ STREAM_AGG() */ " + q[len("select "):]).Rows()
+		streamCost, err := strconv.ParseFloat(rs[0][2].(string), 64)
+		require.NoError(t, err)
+
+		rs = tk.MustQuery("explain format=verbose select /*+ HASH_AGG() */ " + q[len("select "):]).Rows()
+		hashCost, err := strconv.ParseFloat(rs[0][2].(string), 64)
+		require.NoError(t, err)
+
+		// HashAgg should be cheaper than Sort+StreamAgg over a join output.
+		require.Less(t, hashCost, streamCost,
+			"HashAgg (cost=%.2f) should be cheaper than Sort+StreamAgg (cost=%.2f) when GROUP BY is over a join output (no free ordering)",
+			hashCost, streamCost)
+	})
+}

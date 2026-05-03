@@ -619,21 +619,15 @@ func getPlanCostVer24PhysicalStreamAgg(pp base.PhysicalPlan, taskType property.T
 	return p.PlanCostVer2, nil
 }
 
-// childCanProvideOrderForStreamAgg returns true when the StreamAgg alternative
-// for a HashAgg with this child could consume rows in GROUP BY order without
-// requiring an explicit Sort. The check is structural: walk through
-// order-preserving operators and accept only base-table access paths
-// (IndexReader / IndexLookUpReader / IndexMergeReader / TableReader). Joins,
-// aggregations, applies, and other order-breaking operators return false —
-// for those, the StreamAgg alternative would need a Sort, and applying the
-// HashAgg memory penalty would unfairly favour Sort+StreamAgg over HashAgg.
+// childCanProvideOrderForStreamAgg returns true if child preserves ordering
+// through to a base-table access path.
 //
-// This heuristic is conservative: a base-table access path may still need a
-// Sort if no usable index covers the GROUP BY columns, but the planner's
+// This is a conservative approximation: a base-table access path may still
+// need a Sort if no index covers the GROUP BY columns. The planner's
 // possible-property tracking already filters out StreamAgg alternatives that
 // can't be satisfied by an index, so the false-positive rate in practice is
-// low. We accept the small over-count to keep the cost-time check cheap and
-// avoid threading TableInfo through the cost path.
+// low, and we accept the small over-count to avoid threading TableInfo
+// through the cost path.
 func childCanProvideOrderForStreamAgg(child base.PhysicalPlan) bool {
 	for cur := child; cur != nil; {
 		switch cur.(type) {
@@ -705,17 +699,6 @@ func getPlanCostVer24PhysicalHashAgg(pp base.PhysicalPlan, taskType property.Tas
 	}
 
 	if taskType == property.RootTaskType {
-		// Root (TiDB) tasks: partial workers each process a disjoint subset of input
-		// rows, so all CPU work (agg, group, hash key, probe) is genuinely parallelized
-		// and divided by concurrency. However, each partial worker maintains its own
-		// hash table, so total memory scales with the number of workers. We model this
-		// as concurrency * outputRows * rowSize * memFactor, placed outside the
-		// concurrency division. The penalty is gated on whether the child plan can
-		// provide ordering on the GROUP BY keys naturally — only then is the StreamAgg
-		// alternative free of additional Sort cost and able to benefit from HashAgg's
-		// memory penalty. When no free ordering is available, we skip the penalty so
-		// the optimizer doesn't get steered into a Sort+StreamAgg plan that costs more
-		// than HashAgg in practice.
 		var hashMemCost costusage.CostVer2
 		if childCanProvideOrderForStreamAgg(p.Children()[0]) {
 			hashMemCost = costusage.NewCostVer2(option, memFactor,

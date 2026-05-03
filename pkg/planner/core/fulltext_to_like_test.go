@@ -17,255 +17,118 @@ package core
 import (
 	"testing"
 
+	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseBooleanSearchString(t *testing.T) {
+func TestFTSModifierAllowsNativePushdown(t *testing.T) {
 	tests := []struct {
-		input    string
-		expected []searchTerm
+		name     string
+		modifier ast.FulltextSearchModifier
+		expected bool
 	}{
 		{
-			input: "+apple +pie",
-			expected: []searchTerm{
-				{word: "apple", isRequired: true},
-				{word: "pie", isRequired: true},
-			},
+			name:     "natural language mode (default)",
+			modifier: ast.FulltextSearchModifier(ast.FulltextSearchModifierNaturalLanguageMode),
+			expected: true,
 		},
 		{
-			input: "+apple -cherry",
-			expected: []searchTerm{
-				{word: "apple", isRequired: true},
-				{word: "cherry", isExcluded: true},
-			},
+			name:     "boolean mode",
+			modifier: ast.FulltextSearchModifier(ast.FulltextSearchModifierBooleanMode),
+			expected: false,
 		},
 		{
-			input: "apple*",
-			expected: []searchTerm{
-				{word: "apple"},
-			},
-		},
-		{
-			input: `"exact phrase"`,
-			expected: []searchTerm{
-				{word: "exact phrase"},
-			},
-		},
-		{
-			input: `+database +mysql -oracle "full text"`,
-			expected: []searchTerm{
-				{word: "database", isRequired: true},
-				{word: "mysql", isRequired: true},
-				{word: "oracle", isExcluded: true},
-				{word: "full text"},
-			},
-		},
-		{
-			input: "word1 word2 word3",
-			expected: []searchTerm{
-				{word: "word1"},
-				{word: "word2"},
-				{word: "word3"},
-			},
-		},
-		{
-			input: "+word1* -word2",
-			expected: []searchTerm{
-				{word: "word1", isRequired: true},
-				{word: "word2", isExcluded: true},
-			},
-		},
-		{
-			input: `"unclosed quote`,
-			expected: []searchTerm{
-				{word: "unclosed quote"},
-			},
-		},
-		{
-			input: "word1\t\nword2",
-			expected: []searchTerm{
-				{word: "word1"},
-				{word: "word2"},
-			},
-		},
-		{
-			input: `+"required phrase"`,
-			expected: []searchTerm{
-				{word: "required phrase", isRequired: true},
-			},
-		},
-		{
-			input: `-"excluded phrase"`,
-			expected: []searchTerm{
-				{word: "excluded phrase", isExcluded: true},
-			},
-		},
-		{
-			input: `+"required phrase" optional -"excluded phrase"`,
-			expected: []searchTerm{
-				{word: "required phrase", isRequired: true},
-				{word: "optional"},
-				{word: "excluded phrase", isExcluded: true},
-			},
-		},
-		{
-			input: `+word1 +"required phrase" -word2 -"excluded phrase"`,
-			expected: []searchTerm{
-				{word: "word1", isRequired: true},
-				{word: "required phrase", isRequired: true},
-				{word: "word2", isExcluded: true},
-				{word: "excluded phrase", isExcluded: true},
-			},
-		},
-		{
-			input: `abc"phrase"`,
-			expected: []searchTerm{
-				{word: "abc"},
-				{word: "phrase"},
-			},
-		},
-		{
-			input: `word1 abc"phrase" word2`,
-			expected: []searchTerm{
-				{word: "word1"},
-				{word: "abc"},
-				{word: "phrase"},
-				{word: "word2"},
-			},
-		},
-		{
-			input: `+"unclosed`,
-			expected: []searchTerm{
-				{word: "unclosed", isRequired: true},
-			},
-		},
-		{
-			input: `-"unclosed phrase`,
-			expected: []searchTerm{
-				{word: "unclosed phrase", isExcluded: true},
-			},
+			name:     "natural language mode with query expansion",
+			modifier: ast.FulltextSearchModifier(ast.FulltextSearchModifierNaturalLanguageMode | ast.FulltextSearchModifierWithQueryExpansion),
+			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := parseBooleanSearchString(tt.input)
-			require.Equal(t, len(tt.expected), len(result), "Number of terms should match")
-			for i, expected := range tt.expected {
-				require.Equal(t, expected.word, result[i].word, "Word should match")
-				require.Equal(t, expected.isRequired, result[i].isRequired, "isRequired should match")
-				require.Equal(t, expected.isExcluded, result[i].isExcluded, "isExcluded should match")
-			}
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, ftsModifierAllowsNativePushdown(tt.modifier))
 		})
 	}
 }
 
-func TestParseSearchTerm(t *testing.T) {
+func TestTableHasPublicFTSIndexOnColumn(t *testing.T) {
+	ftsIdx := func(name, column string, state model.SchemaState) *model.IndexInfo {
+		return &model.IndexInfo{
+			Name:         ast.NewCIStr(name),
+			State:        state,
+			Tp:           ast.IndexTypeInvalid,
+			Columns:      []*model.IndexColumn{{Name: ast.NewCIStr(column)}},
+			FullTextInfo: &model.FullTextIndexInfo{ParserType: model.FullTextParserTypeStandardV1},
+		}
+	}
+	plainIdx := func(name, column string) *model.IndexInfo {
+		return &model.IndexInfo{
+			Name:    ast.NewCIStr(name),
+			State:   model.StatePublic,
+			Tp:      ast.IndexTypeBtree,
+			Columns: []*model.IndexColumn{{Name: ast.NewCIStr(column)}},
+		}
+	}
+
 	tests := []struct {
-		input    string
-		expected searchTerm
+		name     string
+		indices  []*model.IndexInfo
+		column   string
+		expected bool
 	}{
 		{
-			input:    "+word",
-			expected: searchTerm{word: "word", isRequired: true},
+			name:     "no indices",
+			indices:  nil,
+			column:   "title",
+			expected: false,
 		},
 		{
-			input:    "-word",
-			expected: searchTerm{word: "word", isExcluded: true},
+			name:     "only non-FTS index on the column",
+			indices:  []*model.IndexInfo{plainIdx("idx_title", "title")},
+			column:   "title",
+			expected: false,
 		},
 		{
-			input:    "word*",
-			expected: searchTerm{word: "word"},
+			name:     "public FTS index on the column",
+			indices:  []*model.IndexInfo{ftsIdx("ft_title", "title", model.StatePublic)},
+			column:   "title",
+			expected: true,
 		},
 		{
-			input:    "+word*",
-			expected: searchTerm{word: "word", isRequired: true},
+			name:     "non-public FTS index on the column",
+			indices:  []*model.IndexInfo{ftsIdx("ft_title", "title", model.StateWriteReorganization)},
+			column:   "title",
+			expected: false,
 		},
 		{
-			input:    "word",
-			expected: searchTerm{word: "word"},
+			name:     "FTS index on a different column",
+			indices:  []*model.IndexInfo{ftsIdx("ft_body", "body", model.StatePublic)},
+			column:   "title",
+			expected: false,
 		},
 		{
-			input:    "",
-			expected: searchTerm{word: ""},
+			name: "FTS index covers the column among many indices",
+			indices: []*model.IndexInfo{
+				plainIdx("idx_id", "id"),
+				ftsIdx("ft_body", "body", model.StatePublic),
+				ftsIdx("ft_title", "title", model.StatePublic),
+			},
+			column:   "title",
+			expected: true,
 		},
 		{
-			input:    "+*",
-			expected: searchTerm{word: "", isRequired: true},
-		},
-		// MySQL relevance modifiers >, <, ~ are stripped; word is treated as optional
-		{
-			input:    ">word",
-			expected: searchTerm{word: "word"},
-		},
-		{
-			input:    "<word",
-			expected: searchTerm{word: "word"},
-		},
-		{
-			input:    "~word",
-			expected: searchTerm{word: "word"},
-		},
-		// Grouping parentheses are stripped
-		{
-			input:    "(word)",
-			expected: searchTerm{word: "word"},
-		},
-		{
-			input:    "(word*)",
-			expected: searchTerm{word: "word"},
+			name:     "case-insensitive column match",
+			indices:  []*model.IndexInfo{ftsIdx("ft_title", "Title", model.StatePublic)},
+			column:   "title",
+			expected: true,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := parseSearchTerm(tt.input)
-			require.Equal(t, tt.expected.word, result.word, "Word should match")
-			require.Equal(t, tt.expected.isRequired, result.isRequired, "isRequired should match")
-			require.Equal(t, tt.expected.isExcluded, result.isExcluded, "isExcluded should match")
-		})
-	}
-}
-
-func TestEscapeLikePattern(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{
-			input:    "normal text",
-			expected: "normal text",
-		},
-		{
-			input:    "100%",
-			expected: "100\\%",
-		},
-		{
-			input:    "test_file",
-			expected: "test\\_file",
-		},
-		{
-			input:    "path\\to\\file",
-			expected: "path\\\\to\\\\file",
-		},
-		{
-			input:    "mix_%_all",
-			expected: "mix\\_\\%\\_all",
-		},
-		{
-			input:    "\\%_",
-			expected: "\\\\\\%\\_",
-		},
-		{
-			input:    "",
-			expected: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := escapeLikePattern(tt.input)
-			require.Equal(t, tt.expected, result, "Escaped pattern should match")
+		t.Run(tt.name, func(t *testing.T) {
+			tblInfo := &model.TableInfo{Indices: tt.indices}
+			require.Equal(t, tt.expected, tableHasPublicFTSIndexOnColumn(tblInfo, tt.column))
 		})
 	}
 }

@@ -150,6 +150,38 @@ select a.id, a.title from articles a inner join articles a2 on a.id = a2.id and 
 -- error 1235
 select id from articles where match(id) against('MySQL');
 
+# Test 37: Plan cache - prepared statement with literal AGAINST IS cacheable.
+# The LIKE rewrite bakes the search string into pattern constants; for a true
+# literal those constants are stable across executions, so the plan must be
+# cacheable. Verifies the LIKE fallback only skips plan cache when the AGAINST
+# constant is mutable (param marker / deferred expr), not for plain literals.
+set @@tidb_enable_prepared_plan_cache=1;
+prepare st_fts_lit from 'select id, title from articles where match(title) against(''MySQL'')';
+execute st_fts_lit;
+execute st_fts_lit;
+select @@last_plan_from_cache;
+deallocate prepare st_fts_lit;
+set @@tidb_enable_prepared_plan_cache=DEFAULT;
+
+# Test 38: Plan cache - prepared statement with ? in AGAINST must NOT cache.
+# A param marker is mutable across executions; baking the first execution's
+# pattern would silently produce wrong results when the bind value changes.
+set @@tidb_enable_prepared_plan_cache=1;
+prepare st_fts from 'select id, title from articles where match(title) against(?)';
+set @q='MySQL';
+execute st_fts using @q;
+execute st_fts using @q;
+select @@last_plan_from_cache;
+# Bind a different value to confirm results stay correct under the non-cached plan.
+set @q='PostgreSQL';
+execute st_fts using @q;
+deallocate prepare st_fts;
+set @@tidb_enable_prepared_plan_cache=DEFAULT;
+
+# Note: user variables in AGAINST (e.g., AGAINST(@search)) are rejected at
+# rewrite time as a non-constant search string, so they never reach the
+# plan-cache decision and need no separate cache-skip coverage here.
+
 # Cleanup
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

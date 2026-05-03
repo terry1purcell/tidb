@@ -247,6 +247,25 @@ func Selectivity(
 				case ast.Like, ast.Ilike, ast.Regexp, ast.RegexpLike:
 					notCoveredStrMatch[i] = x
 					continue
+				case ast.FTSMysqlMatchAgainst:
+					// FTSMysqlMatchAgainst is opaque to the stats engine — its
+					// evalReal errors when called outside TiFlash, so TopN-based
+					// estimation can't run on it directly and the generic fallback
+					// would use SelectivityFactor (0.8) regardless of column stats.
+					// Substitute the equivalent ILIKE-based expression so the
+					// fts-native alternative round sees the same column-stats-derived
+					// row estimate as the LIKE-rewritten round, and neither plan
+					// artificially wins on cost when stats are present on the column.
+					if substitute, err := expression.BuildFTSToILikeExpressionFromBuiltin(ctx.GetExprCtx(), x); err == nil {
+						if subSF, ok := substitute.(*expression.ScalarFunction); ok {
+							notCoveredStrMatch[i] = subSF
+							continue
+						}
+					}
+					// Fall through if substitution failed; the FTS expression will
+					// use the str-match default selectivity (0.1) instead of 0.8.
+					notCoveredStrMatch[i] = x
+					continue
 				case ast.UnaryNot:
 					inner := expression.GetExprInsideIsTruth(x.GetArgs()[0])
 					innerSF, ok := inner.(*expression.ScalarFunction)

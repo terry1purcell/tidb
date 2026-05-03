@@ -694,10 +694,22 @@ func optimize(ctx context.Context, sctx planctx.PlanContext, node *resolve.NodeW
 		initialLogicalPlanCtx = saveLogicalPlanBuildCtx(sessVars)
 		sessVars.StmtCtx.ResetAlternativeLogicalPlanSignals()
 		// Enable LIKE fallback for MATCH...AGAINST whenever alternative logical
-		// plans are active. The flag is set here (before the first round) and
-		// stays set for any subsequent alternative rounds, so all rounds produce
-		// an executable LIKE-based plan. The native FTS builtin path (TiFlash)
-		// is used only when alternative logical plans are disabled.
+		// plans are active. The flag is set here so the first round rewrites
+		// predicate-context MATCH (WHERE / HAVING / JOIN ON) to ILIKE while
+		// scoring contexts (SELECT field / ORDER BY) still use the native
+		// builtin (only it produces a float relevance score).
+		//
+		// The flag also persists across most subsequent alternative rounds, so
+		// they likewise produce executable LIKE-based plans. The "fts-native"
+		// alternative round defined above is the exception: when triggered
+		// (TiFlash replica + public FULLTEXT index detected on every matched
+		// column during round 1), it clears this flag during setup so the
+		// round uses the native FTSMysqlMatchAgainst builtin everywhere and
+		// can compete on cost; cleanup restores the flag for following rounds.
+		//
+		// When alternative logical plans are disabled, the flag stays unset
+		// and every MATCH uses the native builtin path (which requires TiFlash
+		// at execution time).
 		sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback = true
 	}
 

@@ -167,5 +167,52 @@ id	title
 5	MySQL Security
 select id from articles where match(id) against('MySQL');
 Error 1235 (42000): This version of TiDB doesn't yet support 'Doesn't support match search on a non-string column without fulltext index'
+set @@tidb_enable_prepared_plan_cache=1;
+prepare st_fts_lit from 'select id, title from articles where match(title) against(''MySQL'')';
+execute st_fts_lit;
+id	title
+1	MySQL Tutorial
+2	How To Use MySQL Well
+3	Optimizing MySQL
+4	MySQL vs. PostgreSQL
+5	MySQL Security
+execute st_fts_lit;
+id	title
+1	MySQL Tutorial
+2	How To Use MySQL Well
+3	Optimizing MySQL
+4	MySQL vs. PostgreSQL
+5	MySQL Security
+select @@last_plan_from_cache;
+@@last_plan_from_cache
+1
+deallocate prepare st_fts_lit;
+set @@tidb_enable_prepared_plan_cache=DEFAULT;
+set @@tidb_enable_prepared_plan_cache=1;
+prepare st_fts from 'select id, title from articles where match(title) against(?)';
+set @q='MySQL';
+execute st_fts using @q;
+id	title
+1	MySQL Tutorial
+2	How To Use MySQL Well
+3	Optimizing MySQL
+4	MySQL vs. PostgreSQL
+5	MySQL Security
+execute st_fts using @q;
+id	title
+1	MySQL Tutorial
+2	How To Use MySQL Well
+3	Optimizing MySQL
+4	MySQL vs. PostgreSQL
+5	MySQL Security
+select @@last_plan_from_cache;
+@@last_plan_from_cache
+0
+set @q='PostgreSQL';
+execute st_fts using @q;
+id	title
+4	MySQL vs. PostgreSQL
+deallocate prepare st_fts;
+set @@tidb_enable_prepared_plan_cache=DEFAULT;
 set @@tidb_opt_enable_alternative_logical_plans=OFF;
 drop table if exists articles;

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -869,53 +870,89 @@ func TestHashAggMemCostNotDividedByConcurrency(t *testing.T) {
 
 func TestHashAggMemCostGatedOnFreeOrdering(t *testing.T) {
 	// Companion to TestHashAggMemCostNotDividedByConcurrency: verify that the
-	// HashAgg memory penalty is *not* applied when the GROUP BY is over a join
-	// output (no free ordering available). Without gating, the inflated penalty
-	// makes Sort+StreamAgg look cheaper than HashAgg even though paying for an
-	// explicit Sort over the join output is more expensive in practice.
+	// HashAgg memory penalty is gated on whether the child can naturally
+	// provide ordering on the GROUP BY keys. Without this gate the inflated
+	// penalty also fires for GROUP BY over a join output, where the StreamAgg
+	// alternative would need an explicit Sort whose own cost already disfavors
+	// it; double-counting would steer the optimizer toward Sort+StreamAgg.
+	//
+	// Behavioral assertions on plan choice are unreliable here because the
+	// Sort cost over a 1000-row join is already large enough that HashAgg wins
+	// either way. Instead, inspect the HashAgg cost trace directly:
+	//
+	//   * HashAgg's added memory penalty traces as
+	//     `hashmem(<concurrency>*<rows>*<rowSize>*tidb_mem_factor(...))`
+	//     — three numeric tokens before the factor.
+	//   * HashJoin's own (unrelated) memory term traces as
+	//     `hashmem(<rows>*<rowSize>*tidb_mem_factor(...))` — only two
+	//     numeric tokens before the factor.
+	//
+	// Matching the three-token pattern at the HashAgg row therefore detects
+	// only the gated penalty, regardless of any HashJoin in the subtree.
 	testkit.RunTestUnderCascadesWithDomain(t, func(t *testing.T, tk *testkit.TestKit, dom *domain.Domain, cascades, caller string) {
 		store := tk.Session().GetStore()
 		defer func() {
 			tk2 := testkit.NewTestKit(t, store)
 			tk2.MustExec("use test")
-			tk2.MustExec("drop table if exists t_join_a, t_join_b")
+			tk2.MustExec("drop table if exists t_indexed, t_join_a, t_join_b")
 			dom.StatsHandle().Clear()
 		}()
 
 		tk.MustExec("use test")
-		tk.MustExec("drop table if exists t_join_a, t_join_b")
+		tk.MustExec("drop table if exists t_indexed, t_join_a, t_join_b")
+		tk.MustExec("create table t_indexed (a int, b int, c varchar(200), key(b))")
 		tk.MustExec("create table t_join_a (k int, v int, c varchar(200))")
 		tk.MustExec("create table t_join_b (k int, w int, d varchar(200))")
-		var bufA, bufB strings.Builder
+		var bufIdx, bufA, bufB strings.Builder
+		bufIdx.WriteString("insert into t_indexed values ")
 		bufA.WriteString("insert into t_join_a values ")
 		bufB.WriteString("insert into t_join_b values ")
 		for i := 0; i < 1000; i++ {
 			if i > 0 {
+				bufIdx.WriteString(",")
 				bufA.WriteString(",")
 				bufB.WriteString(",")
 			}
+			bufIdx.WriteString(fmt.Sprintf("(%d,%d,'padding-data-for-wide-rows')", i, i))
 			bufA.WriteString(fmt.Sprintf("(%d,%d,'padding-data-for-wide-rows')", i, i))
 			bufB.WriteString(fmt.Sprintf("(%d,%d,'more-padding-data-here')", i, i))
 		}
+		tk.MustExec(bufIdx.String())
 		tk.MustExec(bufA.String())
 		tk.MustExec(bufB.String())
+		tk.MustExec("analyze table t_indexed")
 		tk.MustExec("analyze table t_join_a")
 		tk.MustExec("analyze table t_join_b")
 
-		// GROUP BY over a hash-join output: no index can satisfy the order on the
-		// join result, so the StreamAgg alternative would need an explicit Sort.
-		q := "select t_join_a.v, max(t_join_a.c), max(t_join_b.d) from t_join_a join t_join_b on t_join_a.k = t_join_b.k group by t_join_a.v"
-		rs := tk.MustQuery("explain format=verbose select /*+ STREAM_AGG() */ " + q[len("select "):]).Rows()
-		streamCost, err := strconv.ParseFloat(rs[0][2].(string), 64)
-		require.NoError(t, err)
+		// Three numeric tokens before tidb_mem_factor isolates HashAgg's
+		// memory penalty from any HashJoin hashmem term in the subtree.
+		hashAggMemPattern := regexp.MustCompile(`hashmem\([0-9.]+\*[0-9.]+\*[0-9.]+\*tidb_mem_factor`)
 
-		rs = tk.MustQuery("explain format=verbose select /*+ HASH_AGG() */ " + q[len("select "):]).Rows()
-		hashCost, err := strconv.ParseFloat(rs[0][2].(string), 64)
-		require.NoError(t, err)
+		hashAggTrace := func(query string) string {
+			rows := tk.MustQuery("explain format='cost_trace' " + query).Rows()
+			for _, r := range rows {
+				if strings.Contains(r[0].(string), "HashAgg") {
+					return r[3].(string)
+				}
+			}
+			t.Fatalf("HashAgg not found in plan for %q", query)
+			return ""
+		}
 
-		// HashAgg should be cheaper than Sort+StreamAgg over a join output.
-		require.Less(t, hashCost, streamCost,
-			"HashAgg (cost=%.2f) should be cheaper than Sort+StreamAgg (cost=%.2f) when GROUP BY is over a join output (no free ordering)",
-			hashCost, streamCost)
+		// Free ordering available (HashAgg over an ordered index scan): the
+		// memory penalty must be applied — the index gives StreamAgg a
+		// sort-free alternative, and we want HashAgg to be charged its
+		// concurrent-hash-table cost so the optimizer can compare fairly.
+		traceFree := hashAggTrace("select /*+ HASH_AGG() */ b, count(*), max(c) from t_indexed use index(b) group by b")
+		require.Regexp(t, hashAggMemPattern, traceFree,
+			"HashAgg over an ordered index scan should include the memory penalty term, got: %s", traceFree)
+
+		// No free ordering (HashAgg over a hash-join output): the memory
+		// penalty must be skipped — StreamAgg would need an explicit Sort
+		// whose cost already disfavors it; adding the penalty here would
+		// double-count.
+		traceJoin := hashAggTrace("select /*+ HASH_AGG() */ t_join_a.v, max(t_join_a.c), max(t_join_b.d) from t_join_a join t_join_b on t_join_a.k = t_join_b.k group by t_join_a.v")
+		require.NotRegexp(t, hashAggMemPattern, traceJoin,
+			"HashAgg over a join output must NOT include the memory penalty (gated on free ordering), got: %s", traceJoin)
 	})
 }

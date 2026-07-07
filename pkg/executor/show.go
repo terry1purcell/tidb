@@ -2638,15 +2638,59 @@ func (e *ShowExec) fetchShowDistributionJobs(ctx context.Context) error {
 	return nil
 }
 
-// fillDistributionJobToChunk fills the distribution job to the chunk
+// fillDistributionJobToChunk fills the distribution job to the chunk.
+// The job fields come from PD's JSON scheduler config, so every lookup is
+// type-guarded: a missing or unexpectedly-typed field returns an unmarshal
+// error rather than panicking.
 func fillDistributionJobToChunk(ctx context.Context, job map[string]any, result *chunk.Chunk) error {
-	// alias is {db_name}.{table_name}.{partition_name}
-	alias := strings.Split(job["alias"].(string), ".")
-	logutil.Logger(ctx).Info("fillDistributionJobToChunk", zap.String("alias", job["alias"].(string)))
-	if len(alias) != 3 {
-		return errs.ErrClientProtoUnmarshal.FastGenByArgs(fmt.Sprintf("alias:%s is invalid", job["alias"].(string)))
+	getString := func(key string) (string, error) {
+		v, ok := job[key].(string)
+		if !ok {
+			return "", errs.ErrClientProtoUnmarshal.FastGenByArgs(fmt.Sprintf("invalid or missing string field %q in distribution job", key))
+		}
+		return v, nil
 	}
-	result.AppendUint64(0, uint64(job["job-id"].(float64)))
+	getFloat64 := func(key string) (float64, error) {
+		v, ok := job[key].(float64)
+		if !ok {
+			return 0, errs.ErrClientProtoUnmarshal.FastGenByArgs(fmt.Sprintf("invalid or missing numeric field %q in distribution job", key))
+		}
+		return v, nil
+	}
+	// appendTime appends an optional RFC3339 timestamp field, or NULL when absent.
+	appendTime := func(colIdx int, key string) error {
+		v, ok := job[key]
+		if !ok {
+			result.AppendNull(colIdx)
+			return nil
+		}
+		s, ok := v.(string)
+		if !ok {
+			return errs.ErrClientProtoUnmarshal.FastGenByArgs(fmt.Sprintf("invalid field %q in distribution job", key))
+		}
+		t := &time.Time{}
+		if err := t.UnmarshalText([]byte(s)); err != nil {
+			return err
+		}
+		result.AppendTime(colIdx, types.NewTime(types.FromGoTime(*t), mysql.TypeDatetime, types.DefaultFsp))
+		return nil
+	}
+
+	// alias is {db_name}.{table_name}.{partition_name}
+	aliasStr, err := getString("alias")
+	if err != nil {
+		return err
+	}
+	logutil.Logger(ctx).Info("fillDistributionJobToChunk", zap.String("alias", aliasStr))
+	alias := strings.Split(aliasStr, ".")
+	if len(alias) != 3 {
+		return errs.ErrClientProtoUnmarshal.FastGenByArgs(fmt.Sprintf("alias:%s is invalid", aliasStr))
+	}
+	jobID, err := getFloat64("job-id")
+	if err != nil {
+		return err
+	}
+	result.AppendUint64(0, uint64(jobID))
 	result.AppendString(1, alias[0])
 	result.AppendString(2, alias[1])
 	// partition name maybe empty when the table is not partitioned
@@ -2655,42 +2699,33 @@ func fillDistributionJobToChunk(ctx context.Context, job map[string]any, result 
 	} else {
 		result.AppendString(3, alias[2])
 	}
-	result.AppendString(4, job["engine"].(string))
-	result.AppendString(5, job["rule"].(string))
-	result.AppendString(6, job["status"].(string))
-	timeout := uint64(job["timeout"].(float64))
-	result.AppendString(7, time.Duration(timeout).String())
-	if create, ok := job["create"]; ok {
-		createTime := &time.Time{}
-		err := createTime.UnmarshalText([]byte(create.(string)))
-		if err != nil {
-			return err
-		}
-		result.AppendTime(8, types.NewTime(types.FromGoTime(*createTime), mysql.TypeDatetime, types.DefaultFsp))
-	} else {
-		result.AppendNull(8)
+	engine, err := getString("engine")
+	if err != nil {
+		return err
 	}
-	if start, ok := job["start"]; ok {
-		startTime := &time.Time{}
-		err := startTime.UnmarshalText([]byte(start.(string)))
-		if err != nil {
-			return err
-		}
-		result.AppendTime(9, types.NewTime(types.FromGoTime(*startTime), mysql.TypeDatetime, types.DefaultFsp))
-	} else {
-		result.AppendNull(9)
+	result.AppendString(4, engine)
+	rule, err := getString("rule")
+	if err != nil {
+		return err
 	}
-	if finish, ok := job["finish"]; ok {
-		finishedTime := &time.Time{}
-		err := finishedTime.UnmarshalText([]byte(finish.(string)))
-		if err != nil {
-			return err
-		}
-		result.AppendTime(10, types.NewTime(types.FromGoTime(*finishedTime), mysql.TypeDatetime, types.DefaultFsp))
-	} else {
-		result.AppendNull(10)
+	result.AppendString(5, rule)
+	status, err := getString("status")
+	if err != nil {
+		return err
 	}
-	return nil
+	result.AppendString(6, status)
+	timeout, err := getFloat64("timeout")
+	if err != nil {
+		return err
+	}
+	result.AppendString(7, time.Duration(uint64(timeout)).String())
+	if err := appendTime(8, "create"); err != nil {
+		return err
+	}
+	if err := appendTime(9, "start"); err != nil {
+		return err
+	}
+	return appendTime(10, "finish")
 }
 
 type groupInfo struct {

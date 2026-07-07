@@ -271,6 +271,14 @@ func (r *stmtSummaryRetrieverV2) initSummaryRowsReader(ctx context.Context, sctx
 		rowsReader = newRowsReader(memRows, history)
 	}
 
+	if rowsReader == nil {
+		// The cumulative table (TIDB_STATEMENTS_STATS) has no counterpart in the
+		// persistent (v2) reader, which only exposes the current window and
+		// history. Return an empty reader rather than leaving rowsReader nil,
+		// which would nil-deref in retrieve().
+		rowsReader = newSimpleRowsReader(nil)
+	}
+
 	return rowsReader, nil
 }
 

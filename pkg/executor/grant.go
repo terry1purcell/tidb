@@ -149,10 +149,10 @@ func (e *GrantExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	// Create internal session to start internal transaction.
 	isCommit := false
 	internalSession, err := e.GetSysSession()
-	internalSession.GetSessionVars().User = e.Ctx().GetSessionVars().User
 	if err != nil {
 		return err
 	}
+	internalSession.GetSessionVars().User = e.Ctx().GetSessionVars().User
 	defer func() {
 		if !isCommit {
 			_, err := internalSession.GetSQLExecutor().ExecuteInternal(internalCtx, "rollback")

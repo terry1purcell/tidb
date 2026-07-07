@@ -2643,8 +2643,12 @@ func getRemainDurationForAnalyzeStatusHelper(
 		if statsHandle != nil {
 			var statsTbl *statistics.Table
 			meta := tb.Meta()
-			if partitionName != "" {
-				pt := meta.GetPartitionInfo()
+			// A running analyze_jobs row may name a partition even though the
+			// current table (looked up fresh above) is no longer partitioned,
+			// e.g. after REMOVE PARTITIONING or a drop+recreate. Guard the nil
+			// PartitionInfo so the remaining-time estimate falls back to the
+			// table-level stats instead of panicking.
+			if pt := meta.GetPartitionInfo(); partitionName != "" && pt != nil {
 				tid = pt.GetPartitionIDByName(partitionName)
 				statsTbl = statsHandle.GetPhysicalTableStats(tid, meta)
 			} else {
@@ -3812,7 +3816,10 @@ func (e *memtableRetriever) setDataForAttributes(ctx context.Context, sctx sessi
 
 		labels := label.RestoreRegionLabels(&rule.Labels)
 		var ranges []string
-		for _, data := range rule.Data.([]any) {
+		// rule.Data is JSON-decoded from PD; if it is not the expected slice
+		// shape, treat it as empty rather than panicking on the assertion.
+		ruleData, _ := rule.Data.([]any)
+		for _, data := range ruleData {
 			if kv, ok := data.(map[string]any); ok {
 				startKey := kv["start_key"]
 				endKey := kv["end_key"]
@@ -4227,7 +4234,14 @@ func checkRule(rule *label.Rule) (dbName, tableName string, partitionName string
 }
 
 func decodeTableIDFromRule(rule *label.Rule) (tableID int64, err error) {
-	datas := rule.Data.([]any)
+	// rule.Data is JSON-decoded from PD's region-label config; guard the type
+	// assertion so an unexpected payload shape returns an error rather than
+	// panicking.
+	datas, ok := rule.Data.([]any)
+	if !ok {
+		err = fmt.Errorf("get the label rules %s failed: unexpected data type", rule.ID)
+		return
+	}
 	if len(datas) == 0 {
 		err = fmt.Errorf("there is no data in rule %s", rule.ID)
 		return

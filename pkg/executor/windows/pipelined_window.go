@@ -292,7 +292,15 @@ func (e *PipelinedWindowExec) getStart(ctx sessionctx.Context) (uint64, error) {
 		}
 		return 0, nil
 	case ast.Following:
-		return e.curRowIdx + e.start.Num, nil
+		start := e.curRowIdx + e.start.Num
+		if start < e.curRowIdx {
+			// uint64 overflow from a huge FOLLOWING offset (e.g. a literal like
+			// 18446744073709551615). Saturate at rowCnt so produce clamps it to
+			// an empty frame instead of the value wrapping to a small index and
+			// later underflowing getRows' slice bounds.
+			return e.rowCnt, nil
+		}
+		return start, nil
 	default: // ast.CurrentRow
 		return e.curRowIdx, nil
 	}
@@ -332,7 +340,18 @@ func (e *PipelinedWindowExec) getEnd(ctx sessionctx.Context) (uint64, error) {
 		}
 		return 0, nil
 	case ast.Following:
-		return e.curRowIdx + e.end.Num + 1, nil
+		end := e.curRowIdx + e.end.Num
+		if end < e.curRowIdx {
+			// uint64 overflow from a huge FOLLOWING offset; saturate at rowCnt
+			// (see getStart) so produce clamps it rather than wrapping.
+			return e.rowCnt, nil
+		}
+		end++
+		if end == 0 {
+			// the +1 itself overflowed (offset reached the max index)
+			return e.rowCnt, nil
+		}
+		return end, nil
 	default: // ast.CurrentRow:
 		return e.curRowIdx + 1, nil
 	}

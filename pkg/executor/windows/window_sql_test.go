@@ -46,6 +46,33 @@ func TestWindowFunctions(t *testing.T) {
 	doTestWindowFunctions(tk)
 }
 
+// TestPipelinedWindowHugeFollowingOffset is a regression test for a uint64
+// overflow in the pipelined window executor's ROWS-frame FOLLOWING bounds. A
+// FOLLOWING offset near 2^64-1 made curRowIdx+Num wrap to a small index that
+// survived the rowCnt clamp and then underflowed the frame slice bounds.
+func TestPipelinedWindowHugeFollowingOffset(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set @@tidb_enable_window_function = 1")
+	tk.MustExec("set @@tidb_enable_pipelined_window_function = 1")
+	tk.MustExec("set @@tidb_window_concurrency = 1")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (a int)")
+	tk.MustExec("insert into t values (1), (2), (4)")
+
+	// The start bound (2^64-1 FOLLOWING) sits past the partition end, so every
+	// frame is empty and SUM returns NULL. Without the overflow guard the
+	// wrapped start index underflowed getRows' slice bounds instead.
+	tk.MustQuery("select a, sum(a) over (order by a rows between 18446744073709551615 following and unbounded following) from t").
+		Check(testkit.Rows("1 <nil>", "2 <nil>", "4 <nil>"))
+
+	// A huge FOLLOWING end offset clamps to the partition end, so the frame is
+	// the whole partition and SUM is 7 for every row.
+	tk.MustQuery("select a, sum(a) over (order by a rows between unbounded preceding and 18446744073709551615 following) from t").
+		Check(testkit.Rows("1 7", "2 7", "4 7"))
+}
+
 func doTestWindowFunctions(tk *testkit.TestKit) {
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")

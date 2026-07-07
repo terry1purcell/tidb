@@ -121,3 +121,12 @@ func TestCheckRuleWithKeyspaceID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(123), tableID)
 }
+
+// TestDecodeTableIDFromRuleInvalidData verifies that decodeTableIDFromRule
+// returns an error, rather than panicking on the type assertion, when rule.Data
+// (decoded from PD's JSON) is not the expected slice shape.
+func TestDecodeTableIDFromRuleInvalidData(t *testing.T) {
+	badRule := &label.Rule{ID: "test", Data: map[string]any{"unexpected": "shape"}}
+	_, err := decodeTableIDFromRule(badRule)
+	require.Error(t, err)
+}

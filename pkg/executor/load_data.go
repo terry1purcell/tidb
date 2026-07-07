@@ -491,8 +491,13 @@ func (w *encodeWorker) readOneBatchRows(ctx context.Context, parser mydump.Parse
 			return err
 		}
 		parser.RecycleRow(parser.LastRow())
-		w.rows = append(w.rows, r)
-		w.curBatchCnt++
+		// A nil row means parserData2TableData skipped a non-restrictive row
+		// whose encoding error was downgraded to a warning. Do not append it: a
+		// nil row would later panic during index/key lookup in the commit worker.
+		if r != nil {
+			w.rows = append(w.rows, r)
+			w.curBatchCnt++
+		}
 		if w.maxRowsInBatch != 0 && w.rowCount%w.maxRowsInBatch == 0 {
 			logutil.Logger(ctx).Info("batch limit hit when inserting rows", zap.Int("maxBatchRows", w.MaxChunkSize()),
 				zap.Uint64("totalRows", w.rowCount))
@@ -591,7 +596,9 @@ func (w *encodeWorker) parserData2TableData(
 		}
 		w.handleWarning(err)
 		logutil.Logger(ctx).Error("failed to get row", zap.Error(err))
-		// TODO: shall we ignore this row? Returning nil will make the caller panic.
+		// Skip this row: the error was downgraded to a warning above. A nil row
+		// is the skip signal; readOneBatchRows drops it instead of appending,
+		// which previously let a nil row reach and panic the index/key lookup.
 		return nil, nil
 	}
 

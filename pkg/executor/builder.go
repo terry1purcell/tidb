@@ -5115,14 +5115,14 @@ func (builder *dataReaderBuilder) buildTableReaderForIndexJoin(ctx context.Conte
 	cwc *physicalop.ColWithCmpFuncManager, canReorderHandles bool, memTracker *memory.Tracker, interruptSignal *atomic.Value,
 ) (exec.Executor, error) {
 	e, err := buildNoRangeTableReader(builder.executorBuilder, v)
+	if err != nil {
+		return nil, err
+	}
 	if !canReorderHandles {
 		// `canReorderHandles` is set to false only in IndexMergeJoin. IndexMergeJoin will trigger a dead loop problem
 		// when enabling paging(tidb/issues/35831). But IndexMergeJoin is not visible to the user and is deprecated
 		// for now. Thus, we disable paging here.
 		e.paging = false
-	}
-	if err != nil {
-		return nil, err
 	}
 	tbInfo := e.table.Meta()
 	if tbInfo.GetPartitionInfo() == nil || !builder.sctx.GetSessionVars().StmtCtx.UseDynamicPartitionPrune() {

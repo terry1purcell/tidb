@@ -61,6 +61,12 @@ func generateIndexMergePath(ds *logicalop.DataSource) error {
 	// We will create new Selection for exprs that cannot be pushed in convertToIndexMergeScan.
 	indexMergeConds := make([]expression.Expression, 0, len(ds.AllConds))
 	indexMergeConds = append(indexMergeConds, ds.AllConds...)
+	// Predicates implied by a MATCH ... AGAINST filter, which let it reach a
+	// FULLTEXT index through the ordinary multi-valued index paths below. They
+	// are added only to this local set, never to ds.AllConds: they exist to
+	// unlock an access path, and evaluating them again per row would be pure
+	// overhead since the MATCH they came from already decides the result.
+	indexMergeConds = append(indexMergeConds, deriveFTSIndexFilters(ds)...)
 	sessionAndStmtPermission := (ds.SCtx().GetSessionVars().GetEnableIndexMerge() || len(ds.IndexMergeHints) > 0) && !stmtCtx.NoIndexMergeHint
 	if !sessionAndStmtPermission {
 		warningMsg = "IndexMerge is inapplicable or disabled. Got no_index_merge hint or tidb_enable_index_merge is off."

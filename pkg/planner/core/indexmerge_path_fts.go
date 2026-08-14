@@ -36,18 +36,23 @@ import (
 // here are an over-approximation - a phrase contributes its tokens but not
 // their adjacency, and a prefix contributes nothing - so the index generates
 // candidates and the MATCH decides.
-// KNOWN GAP: this returns nothing today. A MATCH ... AGAINST filter does not
-// appear in ds.AllConds, so the loop below finds nothing to derive from, and no
-// access path is generated. Two theories have been ruled out: the MATCH is not
-// merely nested inside a wrapper (findFTSMatchAgainst searches the whole
-// expression tree), and no FTS-specific guard exists in predicate push-down.
+// KNOWN GAP: this returns nothing today, so no access path is generated.
 //
-// DataSource.PredicatePushDown assigns ds.AllConds from everything handed to
-// it, so the next thing to check is whether the Selection above the DataSource
-// passes the MATCH down at all - the plan keeps it as a root Selection above
-// TableReader, which is consistent with either "never pushed down" or "pushed
-// down, unpushable to TiKV, returned". Distinguishing those two decides the
-// fix.
+// Ruled out so far:
+//   - The MATCH is not merely nested inside a wrapper: findFTSMatchAgainst
+//     searches the whole expression tree.
+//   - No FTS-specific guard exists in predicate push-down, and
+//     splitSetGetVarFunc only diverts GetVar/SetVar.
+//   - DataSource.PredicatePushDown assigns ds.AllConds from everything handed
+//     to it, before any pushability filtering, so an unpushable MATCH would
+//     still land there.
+//
+// The surprising part: instrumenting LogicalSelection.PredicatePushDown showed
+// it is never called for these queries, across many real WHERE selects. So the
+// MATCH never travels the path that would deposit it in ds.AllConds. Find what
+// handles the filter instead - the plan keeps a root Selection above
+// TableReader, so something builds that without going through
+// LogicalSelection.PredicatePushDown - and derive from there.
 func deriveFTSIndexFilters(ds *logicalop.DataSource) []expression.Expression {
 	if ds == nil || len(ds.AllConds) == 0 {
 		return nil

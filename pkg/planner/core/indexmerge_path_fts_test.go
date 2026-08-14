@@ -55,7 +55,7 @@ func explainRows(t *testing.T, tk *testkit.TestKit, sql string) string {
 // TestFTSMatchUsesFullTextIndex is the point of the access path: a MATCH filter
 // should reach the FULLTEXT index instead of scanning every row.
 func TestFTSMatchUsesFullTextIndex(t *testing.T) {
-	t.Skip("MATCH does not reach ds.AllConds yet; see the KNOWN GAP note on deriveFTSIndexFilters")
+	t.Skip("no access path generated yet; see the KNOWN GAP note on deriveFTSIndexFilters")
 	tk := prepareFTSIndexTable(t)
 
 	plan := explainRows(t, tk,

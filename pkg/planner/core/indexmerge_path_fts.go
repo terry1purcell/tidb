@@ -36,12 +36,18 @@ import (
 // here are an over-approximation - a phrase contributes its tokens but not
 // their adjacency, and a prefix contributes nothing - so the index generates
 // candidates and the MATCH decides.
-// KNOWN GAP: this returns nothing today, because a MATCH ... AGAINST filter
-// does not reach ds.AllConds. Local evaluation is not pushable to a storage
-// node, so predicate push-down leaves it in a Selection above the DataSource
-// rather than handing it down, and the loop below finds no MATCH to derive
-// from. Deriving from the parent Selection, or arranging for the MATCH to be
-// recorded on the DataSource, is the remaining work.
+// KNOWN GAP: this returns nothing today. A MATCH ... AGAINST filter does not
+// appear in ds.AllConds, so the loop below finds nothing to derive from, and no
+// access path is generated. Two theories have been ruled out: the MATCH is not
+// merely nested inside a wrapper (findFTSMatchAgainst searches the whole
+// expression tree), and no FTS-specific guard exists in predicate push-down.
+//
+// DataSource.PredicatePushDown assigns ds.AllConds from everything handed to
+// it, so the next thing to check is whether the Selection above the DataSource
+// passes the MATCH down at all - the plan keeps it as a root Selection above
+// TableReader, which is consistent with either "never pushed down" or "pushed
+// down, unpushable to TiKV, returned". Distinguishing those two decides the
+// fix.
 func deriveFTSIndexFilters(ds *logicalop.DataSource) []expression.Expression {
 	if ds == nil || len(ds.AllConds) == 0 {
 		return nil
@@ -50,8 +56,11 @@ func deriveFTSIndexFilters(ds *logicalop.DataSource) []expression.Expression {
 
 	var derived []expression.Expression
 	for _, cond := range ds.AllConds {
-		match, ok := cond.(*expression.ScalarFunction)
-		if !ok || match.FuncName.L != ast.FTSMysqlMatchAgainst {
+		// The MATCH is not necessarily the condition itself: a WHERE clause
+		// wraps a non-boolean expression, so it commonly sits inside an
+		// is-true or comparison node.
+		match := findFTSMatchAgainst(cond)
+		if match == nil {
 			continue
 		}
 		info, isLocal := expression.FTSMysqlMatchAgainstLocalEvalInfo(match)
@@ -185,4 +194,22 @@ func ftsTokenConst(token string) *expression.Constant {
 	tp.SetCharset(mysql.UTF8MB4Charset)
 	tp.SetCollate(mysql.UTF8MB4DefaultCollation)
 	return &expression.Constant{Value: types.NewStringDatum(token), RetType: tp}
+}
+
+// findFTSMatchAgainst returns the first MATCH ... AGAINST call inside expr, or
+// nil when there is none.
+func findFTSMatchAgainst(expr expression.Expression) *expression.ScalarFunction {
+	sf, ok := expr.(*expression.ScalarFunction)
+	if !ok {
+		return nil
+	}
+	if sf.FuncName.L == ast.FTSMysqlMatchAgainst {
+		return sf
+	}
+	for _, arg := range sf.GetArgs() {
+		if found := findFTSMatchAgainst(arg); found != nil {
+			return found
+		}
+	}
+	return nil
 }

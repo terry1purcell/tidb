@@ -28,17 +28,22 @@ import (
 // aggregation or a pushed-down hash aggregation, on the inner side of an index
 // join, which is the shape the rewrite handles. On these small tables the
 // scalar subquery forms pull the aggregation above the join instead, so only
-// their results are checked.
+// their results are checked. The ORDER BY ... LIMIT 1 forms become MIN or MAX
+// on the inner side of an index join, instead of an Apply, only when the groups
+// are large.
 var firstRowPerRangeQueries = []struct {
 	query      string
 	isMax      bool
 	aggIsInner bool
+	limitOne   bool
 }{
-	{"select /*+ inl_join(s@sel_2) */ t.ns_id, (select min(s.id) from %[1]s s where s.ns_id = t.ns_id) m from t where t.ns_id > 0 order by t.ns_id limit 100", false, false},
-	{"select /*+ inl_join(s@sel_2) */ t.ns_id, (select max(s.id) from %[1]s s where s.ns_id = t.ns_id) m from t where t.ns_id > 0 order by t.ns_id limit 100", true, false},
-	{"select /*+ inl_join(m) */ t.ns_id, m.m from t left join (select ns_id, min(id) m from %[1]s group by ns_id) m on t.ns_id = m.ns_id where t.ns_id > 0 order by t.ns_id limit 100", false, true},
-	{"select /*+ inl_join(m) */ t.ns_id, m.m from t left join (select /*+ stream_agg() */ ns_id, min(id) m from %[1]s group by ns_id) m on t.ns_id = m.ns_id where t.ns_id > 0 order by t.ns_id limit 100", false, true},
-	{"select /*+ inl_join(m) */ t.ns_id, m.m from t left join (select /*+ hash_agg() agg_to_cop() */ ns_id, max(id) m from %[1]s group by ns_id) m on t.ns_id = m.ns_id where t.ns_id > 0 order by t.ns_id limit 100", true, true},
+	{"select /*+ inl_join(s@sel_2) */ t.ns_id, (select min(s.id) from %[1]s s where s.ns_id = t.ns_id) m from t where t.ns_id > 0 order by t.ns_id limit 100", false, false, false},
+	{"select /*+ inl_join(s@sel_2) */ t.ns_id, (select max(s.id) from %[1]s s where s.ns_id = t.ns_id) m from t where t.ns_id > 0 order by t.ns_id limit 100", true, false, false},
+	{"select /*+ inl_join(m) */ t.ns_id, m.m from t left join (select ns_id, min(id) m from %[1]s group by ns_id) m on t.ns_id = m.ns_id where t.ns_id > 0 order by t.ns_id limit 100", false, true, false},
+	{"select /*+ inl_join(m) */ t.ns_id, m.m from t left join (select /*+ stream_agg() */ ns_id, min(id) m from %[1]s group by ns_id) m on t.ns_id = m.ns_id where t.ns_id > 0 order by t.ns_id limit 100", false, true, false},
+	{"select /*+ inl_join(m) */ t.ns_id, m.m from t left join (select /*+ hash_agg() agg_to_cop() */ ns_id, max(id) m from %[1]s group by ns_id) m on t.ns_id = m.ns_id where t.ns_id > 0 order by t.ns_id limit 100", true, true, false},
+	{"select t.ns_id, (select s.id from %[1]s s where s.ns_id = t.ns_id order by s.ns_id, s.id limit 1) m from t where t.ns_id > 0 order by t.ns_id limit 100", false, false, true},
+	{"select t.ns_id, (select s.id from %[1]s s where s.ns_id = t.ns_id order by s.id desc limit 1) m from t where t.ns_id > 0 order by t.ns_id limit 100", true, false, true},
 }
 
 func checkFirstRowPerRange(t *testing.T, tk *testkit.TestKit, table string, wantRewrite bool, minRows, maxRows [][]any) {
@@ -49,9 +54,15 @@ func checkFirstRowPerRange(t *testing.T, tk *testkit.TestKit, table string, want
 		for _, r := range plan {
 			planText.WriteString(fmt.Sprintln(r...))
 		}
-		require.Equal(t, wantRewrite && c.aggIsInner, strings.Contains(planText.String(), "first row per range"), "%s\n%s", q, planText.String())
-		if c.aggIsInner {
+		// The ORDER BY ... LIMIT 1 forms are an Apply unless rewritten, and then
+		// an index join reading the first row per range.
+		aggIsInner := c.aggIsInner || (c.limitOne && wantRewrite)
+		require.Equal(t, wantRewrite && aggIsInner, strings.Contains(planText.String(), "first row per range"), "%s\n%s", q, planText.String())
+		if aggIsInner {
 			require.Contains(t, planText.String(), "IndexJoin", q)
+		}
+		if c.limitOne {
+			require.Equal(t, !wantRewrite, strings.Contains(planText.String(), "Apply"), "%s\n%s", q, planText.String())
 		}
 		want := minRows
 		if c.isMax {
@@ -87,4 +98,27 @@ func TestIndexJoinMinFirstRowPerRange(t *testing.T) {
 	checkFirstRowPerRange(t, tk, "big", true,
 		testkit.Rows("1 1001", "2 2001", "3 <nil>", "4 4001", "5 <nil>"),
 		testkit.Rows("1 1300", "2 2300", "3 <nil>", "4 4300", "5 <nil>"))
+
+	// The ORDER BY ... LIMIT 1 form stays an Apply over the Limit when it returns
+	// another column, when another correlated condition would keep the Apply
+	// anyway, and with NO_DECORRELATE.
+	for _, c := range []struct {
+		query string
+		want  [][]any
+	}{
+		{"select t.ns_id, (select s.a from big s where s.ns_id = t.ns_id order by s.ns_id, s.id limit 1) m from t order by t.ns_id",
+			testkit.Rows("1 0", "2 0", "3 <nil>", "4 0", "5 <nil>")},
+		{"select t.ns_id, (select s.id from big s where s.ns_id = t.ns_id and s.id > t.v*1000 + t.v order by s.id limit 1) m from t order by t.ns_id",
+			testkit.Rows("1 1002", "2 2003", "3 <nil>", "4 4005", "5 <nil>")},
+		{"select t.ns_id, (select /*+ no_decorrelate() */ s.id from big s where s.ns_id = t.ns_id order by s.id limit 1) m from t order by t.ns_id",
+			testkit.Rows("1 1001", "2 2001", "3 <nil>", "4 4001", "5 <nil>")},
+	} {
+		var planText strings.Builder
+		for _, r := range tk.MustQuery("explain format='brief' " + c.query).Rows() {
+			planText.WriteString(fmt.Sprintln(r...))
+		}
+		require.Contains(t, planText.String(), "Apply", c.query)
+		require.NotContains(t, planText.String(), "Agg", c.query)
+		tk.MustQuery(c.query).Check(c.want)
+	}
 }

@@ -249,19 +249,34 @@ const firstRowPerRangeMinGroupRows = 256
 // scan's TblColHists is keyed by the UniqueID of the scan's columns, not by
 // the column ID, so each prefix column is looked up through the scan schema.
 func firstRowGroupsAreLarge(colHists *statistics.HistColl, schema *expression.Schema, prefix []*model.ColumnInfo) bool {
+	histIDs := make([]int64, 0, len(prefix))
+	for _, c := range prefix {
+		found := false
+		for _, sc := range schema.Columns {
+			if sc.ID == c.ID {
+				histIDs = append(histIDs, sc.UniqueID)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return avgGroupRowsAreLarge(colHists, histIDs)
+}
+
+// avgGroupRowsAreLarge reports whether the groups formed by the given columns
+// average at least firstRowPerRangeMinGroupRows rows. histIDs are the keys of
+// the columns in colHists.
+func avgGroupRowsAreLarge(colHists *statistics.HistColl, histIDs []int64) bool {
 	if colHists == nil || colHists.Pseudo || colHists.RealtimeCount <= 0 {
 		return false
 	}
 	rows := float64(colHists.RealtimeCount)
 	groups := 1.0
-	for _, c := range prefix {
-		var col *statistics.Column
-		for _, sc := range schema.Columns {
-			if sc.ID == c.ID {
-				col = colHists.GetCol(sc.UniqueID)
-				break
-			}
-		}
+	for _, id := range histIDs {
+		col := colHists.GetCol(id)
 		if col == nil || !col.IsStatsInitialized() || col.Histogram.NDV <= 0 {
 			return false
 		}

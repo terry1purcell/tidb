@@ -54,6 +54,7 @@ go_library(
         "rule_aggregation_skew_rewrite.go",
         "rule_correlate.go",
         "rule_decorrelate.go",
+        "rule_decorrelate_limit_one.go",
         "rule_derive_topn_from_window.go",
         "rule_eliminate_empty_selection.go",
         "rule_eliminate_projection.go",

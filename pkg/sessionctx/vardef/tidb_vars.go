@@ -379,7 +379,9 @@ const (
 	// TiDBOptInSubqToJoinAndAgg is used to enable/disable the optimizer rule of rewriting IN subquery.
 	TiDBOptInSubqToJoinAndAgg = "tidb_opt_insubq_to_join_and_agg"
 
-	// TiDBOptPreferRangeScan is used to enable/disable the optimizer to always prefer range scan over table scan, ignoring their costs.
+	// TiDBOptPreferRangeScan is used to enable/disable the optimizer to prefer range scans over full table scans
+	// when the table statistics are unreliable (pseudo, empty, or heavily modified since the last analyze).
+	// It does not affect the handling of indexes without statistics.
 	TiDBOptPreferRangeScan = "tidb_opt_prefer_range_scan"
 
 	// TiDBOptEnableNoDecorrelateInSelect is used to control whether to enable the NO_DECORRELATE hint for subqueries in the select list.

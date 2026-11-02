@@ -1377,7 +1377,7 @@ type SessionVars struct {
 	// allowInSubqToJoinAndAgg can be set to false to forbid rewriting the semi join to inner join with agg.
 	allowInSubqToJoinAndAgg bool
 
-	// preferRangeScan allows optimizer to always prefer range scan over table scan.
+	// preferRangeScan allows optimizer to prefer range scans over full table scans when table statistics are unreliable.
 	preferRangeScan bool
 
 	// EnableIndexMerge enables the generation of IndexMergePath.

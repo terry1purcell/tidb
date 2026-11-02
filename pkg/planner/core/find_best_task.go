@@ -2021,8 +2021,6 @@ func getIndexMergeCandidate(ds *logicalop.DataSource, path *util.AccessPath, pro
 func skylinePruning(ds *logicalop.DataSource, prop *property.PhysicalProperty) []*candidatePath {
 	candidates := make([]*candidatePath, 0, 4)
 	idxMissingStats := false
-	// tidb_opt_prefer_range_scan is the master switch to control index preferencing
-	preferRange := ds.SCtx().GetSessionVars().GetAllowPreferRangeScan()
 	for _, path := range ds.PossibleAccessPaths {
 		// We should check whether the possible access path is valid first.
 		if path.StoreType != kv.TiFlash && prop.IsFlashProp() {
@@ -2119,10 +2117,11 @@ func skylinePruning(ds *logicalop.DataSource, prop *property.PhysicalProperty) [
 
 	// If we've forced an index merge - we want to keep these plans
 	preferMerge := rule.ShouldPreferIndexMerge(ds)
-	if preferRange {
-		// Override preferRange with the following limitations to scope
-		preferRange = preferMerge || idxMissingStats || ds.TableStats.HistColl.Pseudo || ds.TableStats.RowCount < 1
-	}
+	// Prefer range scans over full scans when an index merge is preferred, when an index without statistics
+	// won skyline pruning, or, if tidb_opt_prefer_range_scan is on, when the table statistics are unreliable.
+	// The variable is only checked (and recorded as relevant) for the last case.
+	preferRange := preferMerge || idxMissingStats ||
+		((ds.TableStats.HistColl.Pseudo || ds.TableStats.RowCount < 1) && ds.SCtx().GetSessionVars().GetAllowPreferRangeScan())
 	if preferRange && len(candidates) > 1 {
 		// If a candidate path is TiFlash-path or forced-path or MV index or global index, we just keep them. For other
 		// candidate paths, if there exists any range scan path, we remove full scan paths and keep range scan paths.

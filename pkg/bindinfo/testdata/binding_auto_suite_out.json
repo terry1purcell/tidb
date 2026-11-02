@@ -173,7 +173,7 @@
         "Fixes": "[45132]"
       },
       {
-        "Vars": "[tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor tidb_opt_prefer_range_scan]",
+        "Vars": "[tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor]",
         "Fixes": "[52869]"
       },
       {
@@ -185,7 +185,7 @@
         "Fixes": "[45132 52869]"
       },
       {
-        "Vars": "[tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor tidb_opt_prefer_range_scan]",
+        "Vars": "[tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor]",
         "Fixes": "[52869]"
       },
       {
@@ -209,11 +209,11 @@
         "Fixes": "[52869]"
       },
       {
-        "Vars": "[tidb_opt_hash_join_cost_factor tidb_opt_index_join_cost_factor tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor tidb_opt_merge_join_cost_factor tidb_opt_prefer_range_scan]",
+        "Vars": "[tidb_opt_hash_join_cost_factor tidb_opt_index_join_cost_factor tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor tidb_opt_merge_join_cost_factor]",
         "Fixes": "[44855 45132 52869]"
       },
       {
-        "Vars": "[tidb_opt_hash_join_cost_factor tidb_opt_index_join_cost_factor tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor tidb_opt_merge_join_cost_factor tidb_opt_prefer_range_scan]",
+        "Vars": "[tidb_opt_hash_join_cost_factor tidb_opt_index_join_cost_factor tidb_opt_index_reader_cost_factor tidb_opt_index_scan_cost_factor tidb_opt_merge_join_cost_factor]",
         "Fixes": "[44855 45132 52869]"
       },
       {

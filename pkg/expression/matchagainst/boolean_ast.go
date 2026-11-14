@@ -14,16 +14,9 @@
 
 package matchagainst
 
-import (
-	"strconv"
-	"strings"
-)
+import "strings"
 
 // BooleanGroup is the parsed form of `AGAINST (... IN BOOLEAN MODE)`.
-//
-// This structure is used for both:
-//   - the root boolean query (with Parenthesized=false)
-//   - a parenthesized sub-expression "( ... )" (with Parenthesized=true)
 //
 // It is a direct representation of the boolean query syntax (not an execution plan).
 //
@@ -33,15 +26,11 @@ import (
 type BooleanGroup struct {
 	// Must holds the clauses prefixed by '+'.
 	Must []BooleanClause
-	// Should holds the clauses without '+'/'-'.
-	// Other boolean-mode modifiers may be represented in the clause's Modifier (even if not currently accepted).
+	// Should holds the clauses without '+'/'-'. The relevance modifiers
+	// '~', '>' and '<' are kept in the clause's Modifier.
 	Should []BooleanClause
 	// MustNot holds the clauses prefixed by '-'.
 	MustNot []BooleanClause
-
-	// Parenthesized indicates this group comes from an explicit "( ... )" in the query.
-	// It only affects DebugString formatting, and is not part of the boolean semantics.
-	Parenthesized bool
 }
 
 // DebugString returns a deterministic, human-readable representation of the group.
@@ -50,14 +39,6 @@ func (g BooleanGroup) DebugString() string {
 	if g.IsEmpty() {
 		return ""
 	}
-	inner := g.debugStringNoParen()
-	if g.Parenthesized {
-		return "(" + inner + ")"
-	}
-	return inner
-}
-
-func (g BooleanGroup) debugStringNoParen() string {
 	var b strings.Builder
 	writeSection := func(label string, clauses []BooleanClause, keepModifier bool) {
 		b.WriteString(label)
@@ -163,15 +144,12 @@ type BooleanExpr interface {
 	Text() string
 }
 
-// BooleanTerm is a TERM/NUM token in boolean mode.
+// BooleanTerm is a TERM token in boolean mode.
 type BooleanTerm struct {
-	// text is the raw TERM/NUM token text (no secondary tokenization).
+	// text is the raw TERM token text (no secondary tokenization).
 	text string
 	// Wildcard means a trailing '*' is present, representing a prefix match.
 	Wildcard bool
-	// Ignored marks terms that are intentionally emitted but ignored by later
-	// stages, e.g. ngram phrase distance forms.
-	Ignored bool
 }
 
 func (*BooleanTerm) booleanExpr() {}
@@ -181,19 +159,10 @@ func (e *BooleanTerm) DebugString() string {
 	if e == nil {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString(e.text)
-	if !e.Wildcard {
-		if e.Ignored {
-			b.WriteString("{ign}")
-		}
-		return b.String()
+	if e.Wildcard {
+		return e.text + "*"
 	}
-	b.WriteByte('*')
-	if e.Ignored {
-		b.WriteString("{ign}")
-	}
-	return b.String()
+	return e.text
 }
 
 // Text returns the raw term text without the wildcard suffix, for use in execution.
@@ -208,9 +177,6 @@ func (e *BooleanTerm) Text() string {
 type BooleanPhrase struct {
 	// text is the content between the quotes (without the surrounding quotes).
 	text string
-	// Distance is from the optional "@N" suffix. It is nil when not specified.
-	// Note: the current standard parser path rejects '@', so this is reserved for future use.
-	Distance *int
 }
 
 func (*BooleanPhrase) booleanExpr() {}
@@ -220,25 +186,7 @@ func (e *BooleanPhrase) DebugString() string {
 	if e == nil {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteByte('"')
-	b.WriteString(e.text)
-	b.WriteByte('"')
-	if e.Distance != nil {
-		b.WriteByte('@')
-		b.WriteString(strconv.Itoa(*e.Distance))
-	}
-	return b.String()
-}
-
-func (*BooleanGroup) booleanExpr() {}
-
-// Text returns the group text representation.
-func (g *BooleanGroup) Text() string {
-	if g == nil {
-		return ""
-	}
-	return g.DebugString()
+	return `"` + e.text + `"`
 }
 
 // Text returns the raw phrase text without the quotes, for use in execution.

@@ -20,15 +20,6 @@ import (
 	"github.com/pingcap/errors"
 )
 
-var (
-	// ErrUnmatchedLeftParen is returned for a search string that opens a
-	// group with '(' and ends before closing it.
-	ErrUnmatchedLeftParen = errors.New("unmatched '(' in BOOLEAN MODE query")
-	// ErrUnmatchedRightParen is returned for a search string with a ')'
-	// that closes no group.
-	ErrUnmatchedRightParen = errors.New("unmatched ')' in BOOLEAN MODE query")
-)
-
 func pickNgramModifier(yesno int8) BooleanModifier {
 	// yesno: +1 / 0 / -1 (required / default / prohibited)
 	if yesno > 0 {
@@ -54,14 +45,13 @@ type ngramPhraseBuilder struct {
 //   - Only '+' and '-' are accepted as unary operators.
 //   - '<', '>' and '~' only change relevance, so they act as delimiters and
 //     the word after them stays optional.
-//   - Operators '(', ')' and '@' are currently unsupported.
+//   - '@' is no operator to MySQL's ngram scanner, which skips it like any
+//     other delimiter, so a word after it is an ordinary word.
+//   - Operators '(' and ')' are currently unsupported.
 func ParseNgramBooleanMode(input string) (*BooleanGroup, error) {
 	s := newNgramScanState(input)
 
 	root := &BooleanGroup{}
-	curGroup := root
-	var groupStack []*BooleanGroup
-
 	var curPhrase *ngramPhraseBuilder
 
 	for {
@@ -70,9 +60,6 @@ func ParseNgramBooleanMode(input string) (*BooleanGroup, error) {
 		case ngramTokEOF:
 			if curPhrase != nil {
 				return nil, errors.New("internal error: EOF in quote")
-			}
-			if len(groupStack) != 0 {
-				return nil, ErrUnmatchedLeftParen
 			}
 			return root, nil
 		case ngramTokWord:
@@ -84,48 +71,26 @@ func ParseNgramBooleanMode(input string) (*BooleanGroup, error) {
 				curPhrase.words = append(curPhrase.words, w)
 				continue
 			}
-			op := pickNgramModifier(tok.yesno)
 			word := &BooleanTerm{
 				text:     tok.text,
 				Wildcard: tok.trunc,
 			}
-			curGroup.addClause(BooleanClause{Modifier: op, Expr: word})
-		case ngramTokLParen:
-			op := pickNgramModifier(tok.yesno)
-			if tok.fromQuote {
-				groupStack = append(groupStack, curGroup)
-				curPhrase = &ngramPhraseBuilder{modifier: op}
-				continue
+			root.addClause(BooleanClause{Modifier: pickNgramModifier(tok.yesno), Expr: word})
+		case ngramTokQuoteOpen:
+			curPhrase = &ngramPhraseBuilder{modifier: pickNgramModifier(tok.yesno)}
+		case ngramTokQuoteClose:
+			if curPhrase == nil {
+				return nil, errors.New("internal error: unexpected quote close")
 			}
-
-			child := &BooleanGroup{Parenthesized: true}
-			curGroup.addClause(BooleanClause{Modifier: op, Expr: child})
-
-			groupStack = append(groupStack, curGroup)
-			curGroup = child
-		case ngramTokRParen:
-			if tok.fromQuote {
-				if curPhrase == nil {
-					return nil, errors.New("internal error: unexpected quote close")
-				}
-				phraseText := strings.Join(curPhrase.words, " ")
-				if phraseText != "" {
-					curGroup.addClause(BooleanClause{
-						Modifier: curPhrase.modifier,
-						Expr:     &BooleanPhrase{text: phraseText},
-					})
-				}
-				curPhrase = nil
-				s.inQuote = false
-			} else if curPhrase != nil {
-				return nil, errors.New("internal error: ')' in quote")
+			phraseText := strings.Join(curPhrase.words, " ")
+			if phraseText != "" {
+				root.addClause(BooleanClause{
+					Modifier: curPhrase.modifier,
+					Expr:     &BooleanPhrase{text: phraseText},
+				})
 			}
-
-			if len(groupStack) == 0 {
-				return nil, ErrUnmatchedRightParen
-			}
-			curGroup = groupStack[len(groupStack)-1]
-			groupStack = groupStack[:len(groupStack)-1]
+			curPhrase = nil
+			s.inQuote = false
 		case ngramTokUnsupportedOp:
 			return nil, errors.Errorf("unsupported operator %q in BOOLEAN MODE query", tok.op)
 		default:

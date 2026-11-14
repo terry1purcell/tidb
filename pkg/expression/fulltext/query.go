@@ -547,8 +547,6 @@ func normalizeBooleanClause(clause matchagainst.BooleanClause, config AnalyzerCo
 		return normalizeBooleanTerm(x, modifier, config, analyzer)
 	case *matchagainst.BooleanPhrase:
 		return normalizeBooleanPhrase(x, config, analyzer)
-	case *matchagainst.BooleanGroup:
-		return nil, fmt.Errorf("unsupported BOOLEAN MODE group expression")
 	default:
 		return nil, fmt.Errorf("unsupported BOOLEAN MODE expression: %T", clause.Expr)
 	}
@@ -560,7 +558,7 @@ func normalizeBooleanTerm(
 	config AnalyzerConfig,
 	analyzer Analyzer,
 ) (queryNode, error) {
-	if term == nil || term.Ignored {
+	if term == nil {
 		return nil, nil
 	}
 	if term.Wildcard {
@@ -597,9 +595,6 @@ func normalizeBooleanTerm(
 func normalizeBooleanPhrase(phrase *matchagainst.BooleanPhrase, config AnalyzerConfig, analyzer Analyzer) (queryNode, error) {
 	if phrase == nil {
 		return nil, nil
-	}
-	if phrase.Distance != nil {
-		return nil, fmt.Errorf("unsupported BOOLEAN MODE phrase proximity")
 	}
 	tokens, err := analyzer.Analyze(phrase.Text())
 	if err != nil {

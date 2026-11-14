@@ -18,6 +18,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/sessionctx/vardef"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util/mock"
@@ -209,4 +210,43 @@ func TestAnalyzeNgramV1ShortTokenGapAfterLongWord(t *testing.T) {
 		{Text: "gh", Position: 0},
 		{Text: "ij", Position: 2},
 	}, tokens)
+}
+
+// TestTokenizeKeepsCombiningMarks covers scripts whose words hold combining
+// marks between their letters. A mark belongs to the letter before it, so a
+// word is not split at one.
+func TestTokenizeKeepsCombiningMarks(t *testing.T) {
+	texts := func(tokens []Token) []string {
+		out := make([]string, 0, len(tokens))
+		for _, token := range tokens {
+			out = append(out, token.Text)
+		}
+		return out
+	}
+	// Hindi vowel signs and the virama, Arabic vowel marks, a decomposed
+	// accent, and Thai vowel and tone marks.
+	require.Equal(t, []string{"हिन्दी", "भाषा"}, texts(PreserveUnderscoreTokenize("हिन्दी भाषा")))
+	require.Equal(t, []string{"العَرَبِيَّة"}, texts(PreserveUnderscoreTokenize("العَرَبِيَّة")))
+	require.Equal(t, []string{"café", "au"}, texts(PreserveUnderscoreTokenize("café au")))
+	require.Equal(t, []string{"น้ำ", "ที่"}, texts(PreserveUnderscoreTokenize("น้ำ ที่")))
+
+	config := AnalyzerConfig{
+		ParserType:           model.FullTextParserTypeStandardV1,
+		InnodbFtMinTokenSize: 3,
+		InnodbFtMaxTokenSize: 84,
+		NgramTokenSize:       2,
+	}
+	for _, parser := range []model.FullTextParserType{model.FullTextParserTypeStandardV1, model.FullTextParserTypeNgramV1} {
+		config.ParserType = parser
+		analyzer, err := GetAnalyzer(config)
+		require.NoError(t, err)
+		doc, err := BuildDocument([]ColumnInput{{Text: "हिन्दी भाषा"}}, analyzer)
+		require.NoError(t, err)
+		query, err := CompileBooleanQuery("+हिन्दी", config)
+		require.NoError(t, err)
+		require.True(t, query.Match(doc), parser)
+		query, err = CompileBooleanQuery("+हिन्दू", config)
+		require.NoError(t, err)
+		require.False(t, query.Match(doc), parser)
+	}
 }

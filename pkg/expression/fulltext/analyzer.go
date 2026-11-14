@@ -179,9 +179,10 @@ func AnalyzerConfigFromSessionVars(sessVars *variable.SessionVars, parserType mo
 	}, nil
 }
 
-// PreserveUnderscoreTokenize tokenizes text with TiCI's PreserveUnderscore
-// tokenizer semantics: Unicode alphanumeric characters and '_' form tokens;
-// every other character is a delimiter.
+// PreserveUnderscoreTokenize tokenizes text after TiCI's PreserveUnderscore
+// tokenizer: Unicode alphanumeric characters and '_' form tokens, and, unlike
+// there, so do the marks that combine with them; every other character is a
+// delimiter.
 func PreserveUnderscoreTokenize(text string) []Token {
 	tokens := make([]Token, 0)
 	tokenPos := 0
@@ -336,8 +337,13 @@ func runeAtByte(text string, offset int) (rune, int) {
 	return ch, offset + size
 }
 
+// isTokenChar reports whether ch is part of a word: a letter, a number, an
+// underscore, or a mark. Marks are the accents, vowel signs and viramas that
+// combine with the letter before them; a word of Hindi, Thai or vocalized
+// Arabic holds one between most of its letters, so splitting at them would
+// leave nothing of the word but single letters.
 func isTokenChar(ch rune) bool {
-	return unicode.IsLetter(ch) || unicode.IsNumber(ch) || ch == '_'
+	return unicode.IsLetter(ch) || unicode.IsNumber(ch) || unicode.IsMark(ch) || ch == '_'
 }
 
 func lengthFilter(tokens []Token, minLen, maxLen int) []Token {

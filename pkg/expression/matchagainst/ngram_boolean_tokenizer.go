@@ -20,8 +20,8 @@ type ngramTokType uint8
 
 const (
 	ngramTokWord ngramTokType = iota
-	ngramTokLParen
-	ngramTokRParen
+	ngramTokQuoteOpen
+	ngramTokQuoteClose
 	ngramTokUnsupportedOp
 	ngramTokEOF
 )
@@ -45,8 +45,6 @@ type ngramToken struct {
 
 	// Unsupported operator only.
 	op rune
-
-	fromQuote bool
 }
 
 type ngramScanState struct {
@@ -67,13 +65,15 @@ func newNgramScanState(input string) *ngramScanState {
 	}
 }
 
+// isNgramWordChar must agree with the analyzer's word characters (see
+// fulltext.isTokenChar), which a word of the search string is split by again.
 func isNgramWordChar(ch rune) bool {
-	return unicode.IsLetter(ch) || unicode.IsNumber(ch) || ch == '_'
+	return unicode.IsLetter(ch) || unicode.IsNumber(ch) || unicode.IsMark(ch) || ch == '_'
 }
 
 func isNgramUnsupportedOp(ch rune) bool {
 	switch ch {
-	case '(', ')', '@':
+	case '(', ')':
 		return true
 	default:
 		return false
@@ -96,13 +96,12 @@ func (s *ngramScanState) nextToken() ngramToken {
 			break
 		}
 
-		// In quote: only '"' yields a synthetic ')' (quote).
+		// In quote: only '"' closes the phrase.
 		if s.inQuote && ch == '"' {
 			s.i++
 			return ngramToken{
-				typ:       ngramTokRParen,
-				yesno:     yesno,
-				fromQuote: true,
+				typ:   ngramTokQuoteClose,
+				yesno: yesno,
 			}
 		}
 
@@ -115,14 +114,13 @@ func (s *ngramScanState) nextToken() ngramToken {
 				}
 			}
 
-			// '"' begins a quote group: produce synthetic '(' (quote) and set inQuote.
+			// '"' begins a phrase.
 			if ch == '"' {
 				s.i++
 				s.inQuote = true
 				return ngramToken{
-					typ:       ngramTokLParen,
-					yesno:     yesno,
-					fromQuote: true,
+					typ:   ngramTokQuoteOpen,
+					yesno: yesno,
 				}
 			}
 
@@ -149,12 +147,11 @@ func (s *ngramScanState) nextToken() ngramToken {
 
 	// EOF.
 	if s.i >= len(s.runes) {
-		// Unclosed quote: auto-close with a synthetic ')' (quote).
+		// An unclosed quote is closed by the end of the input.
 		if s.inQuote {
 			return ngramToken{
-				typ:       ngramTokRParen,
-				yesno:     1,
-				fromQuote: true,
+				typ:   ngramTokQuoteClose,
+				yesno: 1,
 			}
 		}
 		return ngramToken{typ: ngramTokEOF}

@@ -443,6 +443,24 @@ func TestCompileBooleanQueryRankingOperators(t *testing.T) {
 	}
 }
 
+// TestNgramQueryWithAtSign checks that an address can be searched for with
+// the NGRAM parser: '@' separates words there, as in MySQL's ngram scanner.
+func TestNgramQueryWithAtSign(t *testing.T) {
+	config := AnalyzerConfig{ParserType: model.FullTextParserTypeNgramV1, NgramTokenSize: 2}
+	analyzer, err := GetAnalyzer(config)
+	require.NoError(t, err)
+	query, err := CompileBooleanQuery("+user@example.com", config)
+	require.NoError(t, err)
+	for text, want := range map[string]bool{
+		"mail user@example.com today": true,
+		"mail admin@sample.org today": false,
+	} {
+		doc, err := BuildDocument([]ColumnInput{{Text: text}}, analyzer)
+		require.NoError(t, err)
+		require.Equal(t, want, query.Match(doc), text)
+	}
+}
+
 // TestValidateTiKVFullTextIndex covers the analyzer snapshots an index must
 // not be built with, whatever let them through: bounds that admit no token.
 func TestValidateTiKVFullTextIndex(t *testing.T) {

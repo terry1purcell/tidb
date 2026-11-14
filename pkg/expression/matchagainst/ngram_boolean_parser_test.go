@@ -51,14 +51,9 @@ func dumpExpr(expr BooleanExpr) string {
 		if x.Wildcard {
 			b.WriteByte('*')
 		}
-		if x.Ignored {
-			b.WriteString("{ign}")
-		}
 		return b.String()
 	case *BooleanPhrase:
 		return fmt.Sprintf("%q", x.text)
-	case *BooleanGroup:
-		return "(" + dumpGroup(x) + ")"
 	default:
 		return "<unknown>"
 	}
@@ -255,24 +250,24 @@ func TestParseNgramBooleanMode(t *testing.T) {
 			want:  `M[+bar] S["foo"] N[]`,
 		},
 		{
-			name:            "reject unsupported operator '@' after phrase",
-			input:           `"foo"@2 bar`,
-			wantErrContains: "unsupported operator '@'",
+			name:  "'@' after a phrase is a delimiter",
+			input: `"foo"@2 bar`,
+			want:  `M[] S["foo" 2 bar] N[]`,
 		},
 		{
-			name:            "reject unsupported operator '@'",
-			input:           `foo@bar`,
-			wantErrContains: "unsupported operator '@'",
+			name:  "'@' inside a word is a delimiter",
+			input: `user@example.com`,
+			want:  `M[] S[user example com] N[]`,
 		},
 		{
-			name:            "reject unsupported operator '@' with whitespace before distance",
-			input:           `"hello" @10`,
-			wantErrContains: "unsupported operator '@'",
+			name:  "'@' after a space does not carry a prefix operator",
+			input: `+foo @+bar`,
+			want:  `M[+foo] S[bar] N[]`,
 		},
 		{
-			name:            "reject unsupported operator '@' at beginning",
-			input:           `@1`,
-			wantErrContains: "unsupported operator '@'",
+			name:  "'@' at beginning is a delimiter",
+			input: `@1`,
+			want:  `M[] S[1] N[]`,
 		},
 		{
 			name:  "a ranking operator after '+' ends the prefix",

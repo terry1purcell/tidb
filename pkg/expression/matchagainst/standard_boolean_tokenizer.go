@@ -27,7 +27,6 @@ const (
 	standardBooleanTokenOp
 	standardBooleanTokenTerm
 	standardBooleanTokenText
-	standardBooleanTokenNum
 )
 
 type standardBooleanToken struct {
@@ -41,7 +40,6 @@ type standardBooleanToken struct {
 //
 // It follows the InnoDB boolean lexer behavior:
 //   - Operators: * ( ) + - < > ~ @
-//   - NUM: consecutive ASCII digits after '@' (used by the phrase distance syntax "@N")
 //   - TEXT: double-quoted string on the same line ("..."), returned with quotes included
 //   - TERM: a run of bytes up to the next delimiter (whitespace, quote, operator, or '%')
 //
@@ -49,7 +47,6 @@ type standardBooleanToken struct {
 func tokenizeStandardBooleanMode(input string) ([]standardBooleanToken, error) {
 	in := []byte(input)
 	var tokens []standardBooleanToken
-	prevWasAt := false
 
 	for i := 0; i < len(in); {
 		ch := in[i]
@@ -65,23 +62,7 @@ func tokenizeStandardBooleanMode(input string) ([]standardBooleanToken, error) {
 				pos:  i,
 				op:   ch,
 			})
-			prevWasAt = ch == '@'
 			i++
-			continue
-		}
-
-		if prevWasAt && ch >= '0' && ch <= '9' {
-			j := i + 1
-			for j < len(in) && in[j] >= '0' && in[j] <= '9' {
-				j++
-			}
-			tokens = append(tokens, standardBooleanToken{
-				kind: standardBooleanTokenNum,
-				pos:  i,
-				raw:  string(in[i:j]),
-			})
-			prevWasAt = false
-			i = j
 			continue
 		}
 
@@ -100,7 +81,6 @@ func tokenizeStandardBooleanMode(input string) ([]standardBooleanToken, error) {
 				pos:  i,
 				raw:  raw,
 			})
-			prevWasAt = false
 			i = min(j+1, len(in))
 			continue
 		}
@@ -121,7 +101,6 @@ func tokenizeStandardBooleanMode(input string) ([]standardBooleanToken, error) {
 			pos:  i,
 			raw:  string(in[i:j]),
 		})
-		prevWasAt = false
 		i = j
 	}
 

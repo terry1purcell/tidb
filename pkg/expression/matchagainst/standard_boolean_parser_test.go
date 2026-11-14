@@ -89,12 +89,12 @@ func TestParseStandardBooleanMode(t *testing.T) {
 			output: "M[] S['foo'] N[]",
 		},
 		{
-			name:   "term: NUM token is treated as a term",
+			name:   "term: digits are a term",
 			input:  `123`,
 			output: "M[] S[123] N[]",
 		},
 		{
-			name:   "term: NUM can also have a wildcard suffix",
+			name:   "term: digits can also have a wildcard suffix",
 			input:  `123*`,
 			output: "M[] S[123*] N[]",
 		},
@@ -330,7 +330,7 @@ func TestParseStandardBooleanMode(t *testing.T) {
 			errContains: "unexpected token",
 		},
 		{
-			name:        "error: phrase distance '@NUM' is rejected",
+			name:        "error: phrase distance '@N' is rejected",
 			input:       `"hello world"@10`,
 			errContains: "unexpected token",
 		},

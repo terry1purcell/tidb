@@ -31,7 +31,7 @@ import (
 //	query  := clause*
 //	clause := [prefix] term | [prefix] phrase | ['*'] term
 //	prefix := '+' | '-'
-//	term   := (TERM | NUM) ['*']
+//	term   := TERM ['*']
 //	phrase := TEXT
 //
 // Notes:
@@ -48,7 +48,7 @@ func ParseStandardBooleanMode(input string) (*BooleanGroup, error) {
 	p := standardBooleanParser{
 		tokens: tokens,
 	}
-	g, err := p.parseGroup(false)
+	g, err := p.parseGroup()
 	if err != nil {
 		return nil, err
 	}
@@ -63,8 +63,8 @@ type standardBooleanParser struct {
 	idx    int
 }
 
-// parseGroup reads zero or more clauses until EOF, or until it sees ')' (when stopAtRightParen is true).
-func (p *standardBooleanParser) parseGroup(stopAtRightParen bool) (*BooleanGroup, error) {
+// parseGroup reads zero or more clauses until EOF.
+func (p *standardBooleanParser) parseGroup() (*BooleanGroup, error) {
 	var g BooleanGroup
 	for {
 		t := p.peek()
@@ -72,9 +72,6 @@ func (p *standardBooleanParser) parseGroup(stopAtRightParen bool) (*BooleanGroup
 			break
 		}
 		if t.kind == standardBooleanTokenOp && t.op == ')' {
-			if stopAtRightParen {
-				break
-			}
 			return nil, errors.Errorf("unexpected ')' at pos %d", t.pos)
 		}
 
@@ -92,7 +89,7 @@ func (p *standardBooleanParser) parseGroup(stopAtRightParen bool) (*BooleanGroup
 }
 
 // parseClause parses one boolean "clause". A clause can be:
-//   - a term token (TERM/NUM) (optionally prefixed by '+', '-', '~', '>' or '<', optionally with trailing '*')
+//   - a term token (TERM) (optionally prefixed by '+', '-', '~', '>' or '<', optionally with trailing '*')
 //   - a phrase token ("...") (optionally prefixed by one of the same operators)
 //
 // '~', '>' and '<' only affect relevance, so their clauses stay optional.
@@ -114,7 +111,7 @@ func (p *standardBooleanParser) parseClause() (*BooleanClause, error) {
 	}
 
 	switch p.peek().kind {
-	case standardBooleanTokenTerm, standardBooleanTokenNum:
+	case standardBooleanTokenTerm:
 		term, err := p.parseTermExpr()
 		if err != nil {
 			return nil, err
@@ -136,32 +133,9 @@ func (p *standardBooleanParser) parseClause() (*BooleanClause, error) {
 	}
 }
 
-// parseGroupClause parses a parenthesized boolean sub-expression "(...)". It is currently unused because
-// '(' / ')' are rejected in the STANDARD boolean-mode path, but kept to preserve the overall parser structure.
-// func (p *standardBooleanParser) parseGroupClause(mod BooleanModifier) (*BooleanClause, error) {
-// 	if err := p.expectOp('('); err != nil {
-// 		return nil, err
-// 	}
-// 	inner, err := p.parseGroup(true)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	if err := p.expectOp(')'); err != nil {
-// 		return nil, err
-// 	}
-// 	if inner.IsEmpty() {
-// 		return nil, nil
-// 	}
-// 	inner.Parenthesized = true
-// 	return &BooleanClause{
-// 		Modifier: mod,
-// 		Expr:     &inner,
-// 	}, nil
-// }
-
 func (p *standardBooleanParser) parseTermExpr() (*BooleanTerm, error) {
 	t := p.peek()
-	if t.kind != standardBooleanTokenTerm && t.kind != standardBooleanTokenNum {
+	if t.kind != standardBooleanTokenTerm {
 		return nil, errors.Errorf("expected term at pos %d, got %s", t.pos, p.tokenDesc(t))
 	}
 	p.consume()
@@ -260,8 +234,6 @@ func (p *standardBooleanParser) tokenDesc(t standardBooleanToken) string {
 		return "TERM(" + strconv.Quote(t.raw) + ")"
 	case standardBooleanTokenText:
 		return "TEXT(" + strconv.Quote(t.raw) + ")"
-	case standardBooleanTokenNum:
-		return "NUM(" + strconv.Quote(t.raw) + ")"
 	default:
 		return "UNKNOWN"
 	}
